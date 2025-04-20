@@ -7,3 +7,5 @@ downloaded_files/*.*
 *.m
 
 *.DS_Store
+*.pth
+trained_models
