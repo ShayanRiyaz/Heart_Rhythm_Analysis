@@ -9,3 +9,5 @@ downloaded_files/*.*
 *.DS_Store
 *.pth
 trained_models
+downloaded_files
+archive
