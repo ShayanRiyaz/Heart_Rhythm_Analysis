@@ -1,5 +1,5 @@
 import numpy as np
-from mmpdv2_beat_detector import MMPDV2BeatDetector, mmpdv2_beat_detector
+from mmpdv2_beat_detector_old import MMPDV2BeatDetector, mmpdv2_beat_detector
 
 # ---------------------------------------------
 #  Config
