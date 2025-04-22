@@ -25,10 +25,8 @@ class UNet1D(nn.Module):
             c = base*(2**d)
         self.downs = nn.ModuleList(downs)
 
-        # ── ❶ bridge: keep the same #channels, NOT double them  ────────────
         self.bridge = ConvBlock(c, c, k=9)
 
-        # ── decoder   (one up‑conv + cat + convblock at each scale) ───────
         for d in reversed(range(depth-1)):
             ups.append(nn.ConvTranspose1d(c, c//2, 4, stride=2, padding=1))
             ups.append(ConvBlock(c + c//2, c//2, k=9))
@@ -38,7 +36,7 @@ class UNet1D(nn.Module):
         self.head = nn.Conv1d(base, 1, 1)
 
     def forward(self, x):
-        orig_len = x.shape[-1]                # ← ① remember 3 750
+        orig_len = x.shape[-1]                
         skips = []
         for down in self.downs:
             x = down(x)
@@ -48,14 +46,14 @@ class UNet1D(nn.Module):
         x = self.bridge(x)
 
         for i in range(0, len(self.ups), 2):
-            x = self.ups[i](x)       # up‑conv
+            x = self.ups[i](x)       
             skip = skips[-(i//2 + 1)]
             if x.shape[-1] != skip.shape[-1]:
                 diff = skip.shape[-1] - x.shape[-1]
                 x = nn.functional.pad(x, (0, diff))
             x = torch.cat([x, skip], dim=1)
-            x = self.ups[i+1](x)     # conv block
+            x = self.ups[i+1](x)     
 
         if x.shape[-1] != orig_len:
             x = nn.functional.interpolate(x, size=orig_len,mode='linear', align_corners=False)
-        return self.head(x).squeeze(1)  # (B, 3750)
+        return self.head(x).squeeze(1)  
