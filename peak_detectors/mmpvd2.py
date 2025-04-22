@@ -100,11 +100,11 @@ class MSPTDFastV2BeatDetector:
         # -- optional scale optimisation via inverse-gamma (prune scales only) --
         if self.optimisation and self.find_peaks and m_max.size:
             gamma_max = np.sum(m_max, axis=1)
-            k_opt = int(np.argmin(1.0 / gamma_max)) + 1
+            k_opt = int(np.argmin(1.0 / (gamma_max+1e-5))) + 1
             m_max = m_max[:k_opt, :]
         if self.optimisation and self.find_onsets and m_min.size:
             gamma_min = np.sum(m_min, axis=1)
-            k_opt_min = int(np.argmin(1.0 / gamma_min)) + 1
+            k_opt_min = int(np.argmin(1.0 / (gamma_max+1e-5))) + 1
             m_min = m_min[:k_opt_min, :]
 
         # -- coarse detection --

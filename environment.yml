@@ -1,0 +1,20 @@
+name: heart_rhythm_applications
+channels:
+  - conda-forge
+  
+dependencies:
+  - python
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - jupyterlab
+  - pip
+  - pip:
+      - torch
+      - torchvision
+      - wfdb
+      - tqdm
+      - hydra-core
