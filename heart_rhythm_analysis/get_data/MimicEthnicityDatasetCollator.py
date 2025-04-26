@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import wfdb
 from scipy.io import savemat
+from concurrent.futures import ThreadPoolExecutor
 
 class MimicEthnicityDatasetCollator:
     def __init__(self, config):
@@ -131,103 +132,112 @@ class MimicEthnicityDatasetCollator:
             if curr_subject_count >= self.num_subjects:
                 break
 
-            curr_dir = f"https://physionet.org/static/published-projects/mimic3wdb-matched/1.0/{curr_record[:-1]}"
-            file_recs = self.get_file_extensions(curr_dir)
+            # curr_dir = f"https://physionet.org/static/published-projects/mimic3wdb-matched/1.0/{curr_record[:-1]}"
+            # file_recs = self.get_file_extensions(curr_dir)
+            # hea_files = [f for f in file_recs if f.endswith('.hea')]
+
+            curr_dir = curr_record.rstrip('/')
+            full_url = f"https://physionet.org/static/published-projects/mimic3wdb-matched/1.0/{curr_dir}"
+            file_recs = self.get_file_extensions(full_url)
             hea_files = [f for f in file_recs if f.endswith('.hea')]
+
+            curr_pn_dir = f"mimic3wdb-matched/1.0/{curr_dir}"
+
+            # Parallel header loading
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                headers = list(executor.map(
+                    lambda hea_file: self.load_header(hea_file[:-4], curr_pn_dir),
+                    hea_files
+                ))
+
+            valid_pairs = [(idx, header) for idx, header in enumerate(headers) if header is not None]
+            if not valid_pairs:
+                continue
 
             complete_set_files = []
             file_durations = []
             file_freqs = []
 
-            for idx, hea_file in enumerate(hea_files):
-                base_name = hea_file[:-4]
-                header = wfdb.rdheader(
-                    record_name=base_name,
-                    pn_dir=f"mimic3wdb-matched/1.0/{curr_record[:-1]}"
-                    )
-                
+            for idx, header in valid_pairs:
                 sig_names = header.sig_name
-                if (sig_names is None):
+                if sig_names is None:
                     continue
-
-                ppg_ecg_check = all(label in sig_names for label in ['PLETH', 'II'])
-                if (not ppg_ecg_check):
+                
+                # Check PPG + ECG presence
+                if not all(label in sig_names for label in ['PLETH', 'II']):
                     continue
-
+                
+                # Check ABP/ART presence
                 arterial_signals = [label for label in self.Arterial_blood_pressure_labels if label in sig_names]
-                if arterial_signals:
-                    blood_pressure_label = arterial_signals[0]  # Priority order preserved: ABP preferred over ART
-                else:
+                if not arterial_signals:
                     continue
-            
+
                 complete_set_files.append(idx)
                 file_durations.append(header.sig_len)
-                file_freqs.append((header.fs))
+                file_freqs.append(header.fs)
 
-            if len(complete_set_files) == 0:
+            if not complete_set_files:
                 continue
 
-            max_duration_idx = np.argmax(file_durations)
-            print(file_durations,max_duration_idx)
-            print(file_durations[max_duration_idx],file_durations[max_duration_idx-1])
-            max_duration  = file_durations[max_duration_idx]
-            max_freq = file_freqs[max_duration_idx]
-            max_duration_file = hea_files[int(complete_set_files[max_duration_idx])]
+            complete_set_files = np.array(complete_set_files)
+            file_durations = np.array(file_durations)
+            file_freqs = np.array(file_freqs)
+
+            max_idx = np.argmax(file_durations)
+            hea_idx = complete_set_files[max_idx]
+            max_duration_file = hea_files[hea_idx]
+            max_freq = file_freqs[max_idx]
+            max_duration = file_durations[max_idx]
+
             if max_freq > 125:
-                    print(f"Max Freq: {max_freq:.2f}")
-            MIN_LEN = max_freq*30*60
+                print(f"Max Freq: {max_freq:.2f}")
+
+            MIN_LEN = max_freq * 30 * 60
             if max_duration < MIN_LEN:
                 continue
 
             try:
                 subj_id = curr_record.split('/')[-2]
                 rec_id = max_duration_file[:-4]
-                base_name = rec_id
-                subj_data = {} 
-
-                record = wfdb.rdrecord(base_name,pn_dir = f"mimic3wdb-matched/1.0/{curr_record[:-1]}",sampto=MIN_LEN)
-                print(f"File: {curr_record}{max_duration_file} | subj_id: {subj_id} | rec_id: {rec_id} | file: {hea_file}| Max Signal Samples: {max_duration} | Fs: {max_freq:.2f}  | Duration (mins): {(max_duration/max_freq)/60:.2f}")
+                record = wfdb.rdrecord(rec_id, pn_dir=curr_pn_dir, sampto=MIN_LEN)
                 sig_names = record.sig_name
+
+                # print(f"File: {curr_record}/{max_duration_file} | subj_id: {subj_id} | Duration: {(max_duration/max_freq)/60:.2f} mins")
+                print(f"File: {curr_record}{max_duration_file} | subj_id: {subj_id} | rec_id: {rec_id} | file: {hea_file}| Max Signal Samples: {max_duration} | Fs: {max_freq:.2f}  | Duration (mins): {(max_duration/max_freq)/60:.2f}")
+                
                 subj_data = {
                     'fix': {
                         'subj_id': subj_id,
                         'rec_id': rec_id,
-                        'files': hea_file,
+                        'files': max_duration_file,
                         'af_status': -1
                     },
                     'ppg': {},
                     'ekg': {},
-                    'imp': {},
                     'bp': {}
                 }
 
-                idx = sig_names.index('PLETH')
-                subj_data['ppg']['v'] = record.p_signal[:, idx]
+                # Extract signals
+                subj_data['ppg']['v'] = record.p_signal[:, sig_names.index('PLETH')]
                 subj_data['ppg']['fs'] = record.fs
-                subj_data['ppg']['method'] = 'PPG from .hea/.dat scan'
+                subj_data['ppg']['method'] = 'PPG from .hea/.dat'
 
-                idx = sig_names.index('II')
-                subj_data['ekg']['v'] = record.p_signal[:, idx]
+                subj_data['ekg']['v'] = record.p_signal[:, sig_names.index('II')]
                 subj_data['ekg']['fs'] = record.fs
-                subj_data['ekg']['method'] = f'ECG from lead II'
+                subj_data['ekg']['method'] = 'ECG from lead II'
                 subj_data['ekg']['label'] = 'II'
 
-                # if 'RESP' in sig_names:
-                #     idx = sig_names.index('RESP')
-                #     subj_data['imp']['v'] = record.p_signal[:, idx]
-                #     subj_data['imp']['fs'] = record.fs
-                #     subj_data['imp']['method'] = 'Respiration from .hea/.dat scan'
-
-                idx = sig_names.index(blood_pressure_label)
-                subj_data['bp']['v'] = record.p_signal[:, idx]
+                blood_pressure_label = next(lab for lab in self.Arterial_blood_pressure_labels if lab in sig_names)
+                subj_data['bp']['v'] = record.p_signal[:, sig_names.index(blood_pressure_label)]
                 subj_data['bp']['fs'] = record.fs
-                subj_data['bp']['method'] = f'{blood_pressure_label} from .hea/.dat scan'
+                subj_data['bp']['method'] = f'{blood_pressure_label} from .hea/.dat'
 
                 subject_data.append(subj_data)
-                print(f'Added: {curr_record[:-1]}/{hea_file}')
-                curr_subject_count+= 1
+                curr_subject_count += 1
+                print(f"Added: {curr_record}/{max_duration_file} | Subjects: {curr_subject_count}/{self.num_subjects}")
+                
             except Exception as e:
-                print(f"Failed to read record {base_name}: {e}")
+                print(f"Failed to read record {rec_id}: {e}")
             print(f'Num Subjects {curr_subject_count}/{self.num_subjects}')
         savemat(self.out_path, {'data': subject_data})
         print(f"Saved structured data with {len(subject_data)} entries to {self.out_path}")

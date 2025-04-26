@@ -7,7 +7,7 @@ import uuid
 import zarr
 import h5py
 import pandas as pd
-from utils.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal
+from utils.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal,pseudo_peak_vector
 
 class CapnoBaseETL:
     """
@@ -70,14 +70,17 @@ class CapnoBaseETL:
                                  numtaps=self.fir_numtaps,
                                  zero_phase=self.zero_phase)
             scaling_config = find_sliding_window(len(dec), target_windows = 5, overlap=25)
-            dec = scale_signal(dec, config = scaling_config, method = self.scale_type)
+            x = scale_signal(dec, config = scaling_config, method = self.scale_type)
+            y_peaks = pseudo_peak_vector(dec)    # convert back to numpy
+            
             win_id = str(uuid.uuid4())
             self.windows_data.append({
                 'subject': raw['subject'],
                 'rec_id' : 0,
                 'window_id': win_id,
                 'raw_ppg': raw_win,
-                'proc_ppg': dec,
+                'proc_ppg': x,
+                'y':y_peaks,
                 'fs': self.fs_out,
                 'label':-1
             })
@@ -91,6 +94,7 @@ class CapnoBaseETL:
                 win_grp = subj_grp.create_group(win['window_id'])
                 win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
                 win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
+                win_grp.create_dataset('y', data=win['y'], compression='gzip')
                 win_grp.attrs['fs'] = win['fs']
                 win_grp.attrs['rec_id'] = win['rec_id']
                 win_grp.attrs['label'] = win['label']
