@@ -11,13 +11,14 @@ class MimicAFETL:
         self.output_dir = config["output_dir"]
         self.window_size_sec = config.get("window_size_sec", 30)
         self.fs_in = config.get("fs_in", 125.0)
-        self.fs_out = config.get("fs_out", 20.83)
+        self.fs_out = config.get("fs_out",self.fs_in)
         self.lowpass_cutoff = config.get("lowpass_cutoff", 8.0)
         self.fir_numtaps = config.get("fir_numtaps", 129)
         self.zero_phase = config.get("zero_phase", True)
         self.out_filename = config.get("out_filename", True)
         self.windows_data = []  # list of dicts
-        self.scale_type = "norm"
+        self.scale_type = config.get("scale_type", None)
+        self.bdecimate_signal = None 
         
     def extract(self):
         print(f"Loading {self.input_dir}")
@@ -30,7 +31,11 @@ class MimicAFETL:
             rec_id = str(rec.fix.rec_id)
             subj_id = str(rec.fix.subj_id)
             af_status = int(rec.fix.af_status)
-
+            try:
+                notes = rec.fix.notes
+            except Exception as E:
+                notes = ""
+            
             sig_obj = getattr(rec, "ppg", None)
             if not hasattr(sig_obj, "v"):
                 continue
@@ -44,16 +49,20 @@ class MimicAFETL:
             for i in range(len(ppg) // win_samples):
                 start, end = i*win_samples, (i+1)*win_samples
                 raw_win = ppg[start:end]
-                cleaned = clean_signal(raw_win)
-                if cleaned is None: continue
-                dec = decimate_signal(cleaned,
-                                    fs_in=fs, fs_out=self.fs_out,
-                                    cutoff=self.lowpass_cutoff,
-                                    numtaps=self.fir_numtaps,
-                                    zero_phase=self.zero_phase)
-                scaling_config = find_sliding_window(len(dec), target_windows = 5, overlap=25)
-                x = scale_signal(dec, config = scaling_config, method = self.scale_type)
-                y_peaks = pseudo_peak_vector(dec)    # convert back to numpy
+                x = clean_signal(raw_win)
+                if x is None: continue
+                if (self.bdecimate_signal) is False or (self.bdecimate_signal is None):
+                    x = decimate_signal(x,
+                                        fs_in=fs, fs_out=self.fs_out,
+                                        cutoff=self.lowpass_cutoff,
+                                        numtaps=self.fir_numtaps,
+                                        zero_phase=self.zero_phase)
+                else: 
+                    self.fs_out = fs
+                if self.scale_type is not None:
+                    scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
+                    x = scale_signal(x, config = scaling_config, method = self.scale_type)
+                y_peaks = pseudo_peak_vector(x,fs = self.fs_out )    # convert back to numpy
                 win_id = str(uuid.uuid4())
                 self.windows_data.append({
                     'subject': f'{subj_id}',
@@ -63,7 +72,8 @@ class MimicAFETL:
                     'proc_ppg': x,
                     'y':y_peaks,
                     'fs': self.fs_out,
-                    'label': af_status
+                    'label': af_status,
+                    'notes': notes
                 })
 
     def save_h5(self):
@@ -78,6 +88,10 @@ class MimicAFETL:
                 win_grp.attrs['fs'] = win['fs']
                 win_grp.attrs['rec_id'] = win['rec_id']
                 win_grp.attrs['label'] = win['label']
+                try:
+                    win_grp.attrs['notes'] = win['notes']
+                except:
+                    win_grp.attrs['notes'] = ""
         return h5_path
 
 

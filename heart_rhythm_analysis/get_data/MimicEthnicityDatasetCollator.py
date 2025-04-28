@@ -203,7 +203,7 @@ class MimicEthnicityDatasetCollator:
                 sig_names = record.sig_name
 
                 # print(f"File: {curr_record}/{max_duration_file} | subj_id: {subj_id} | Duration: {(max_duration/max_freq)/60:.2f} mins")
-                print(f"File: {curr_record}{max_duration_file} | subj_id: {subj_id} | rec_id: {rec_id} | file: {hea_file}| Max Signal Samples: {max_duration} | Fs: {max_freq:.2f}  | Duration (mins): {(max_duration/max_freq)/60:.2f}")
+                print(f"File: {curr_record}{max_duration_file} | subj_id: {subj_id} | rec_id: {rec_id} | file: {max_duration_file}| Max Signal Samples: {max_duration} | Fs: {max_freq:.2f}  | Duration (mins): {(max_duration/max_freq)/60:.2f}")
                 
                 subj_data = {
                     'fix': {
