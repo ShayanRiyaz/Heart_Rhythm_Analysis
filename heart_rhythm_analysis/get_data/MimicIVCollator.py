@@ -14,20 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 
     
 def find_matching_rows(df, columns, match_strings):
-    # 1. Prepare the regex pattern
     pattern = '|'.join(map(re.escape, match_strings))
     regex = re.compile(pattern, flags=re.IGNORECASE)
-
-    # 2. Extract the columns into a NumPy array
     values = df[columns].astype(str).to_numpy()
-
-    # 3. Flatten matching by vectorized comparison
     match_matrix = np.vectorize(lambda x: bool(regex.search(x)))(values)
-
-    # 4. Find rows where any column matched
     row_matches = match_matrix.any(axis=1)
-
-    # 5. Return matching row indices
     return df.index[row_matches].tolist()
 
 
@@ -53,7 +44,7 @@ class MimicIVCollator():
         # self.categories_of_interest = ["fibrillation","sinus rhythm"]
         self.categories_of_interest = ["sinus rhythm"]
         
-        self.out_path = os.path.join(self.root_dir, f"mimic{self.mimic_num}_{self.categories_of_interest[0] if self.categories_of_interest is not None else ''}_struct.mat")
+        self.out_path = os.path.join(self.root_dir, f"tmimic{self.mimic_num}_{self.categories_of_interest[0].replace(" ","_") if self.categories_of_interest is not None else ''}_struct.mat")
     
     def collate_dataset(self, load_metadata=True, load_waveforms=True, download_waveforms=False):
         print("\n ~~~ Downloading and collating MIMIC III matched waveform subset ~~~")
@@ -72,7 +63,10 @@ class MimicIVCollator():
         else:
             records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
             records = pd.read_table(os.path.join(self.out_dir,'RECORDS'))
-            machine_measurments_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'))
+            dtype_cols = { 
+                16: str, 17: str, 18: str, 19: str, 20: str, 21: str 
+            }
+            machine_measurments_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'),dtype=dtype_cols)
 
         if load_waveforms:
             self.scan_waveform_directory(records,records_db,machine_measurments_db)
@@ -139,12 +133,9 @@ class MimicIVCollator():
         base_url = self.mimic_path
         os.makedirs(output_folder, exist_ok=True)
 
-        # Step 1: Fetch the page
         response = requests.get(base_url)
         response.raise_for_status()
         html_text = response.text
-
-        # Step 2: Parse manually for <a href="...">
         hrefs = []
         for line in html_text.splitlines():
             line = line.strip()
@@ -154,10 +145,7 @@ class MimicIVCollator():
                 href = line[start:end]
                 hrefs.append(href)
 
-        # Step 3: Filter out folders (hrefs ending with '/')
         file_hrefs = [href for href in hrefs if not href.endswith('/')]
-
-        # Step 4: Download files
         for file_href in file_hrefs:
             full_url = base_url + file_href
             local_filename = os.path.join(output_folder, file_href)
@@ -169,7 +157,6 @@ class MimicIVCollator():
             with open(local_filename, 'wb') as f:
                 for chunk in file_response.iter_content(chunk_size=8192):
                     f.write(chunk)
-
         print("Download complete.")
             
 
@@ -181,6 +168,7 @@ class MimicIVCollator():
             return None
     
     def scan_waveform_directory(self,records,records_db,machine_measurments_db):
+        bMatchOverwrite = True
         print("Scanning for waveform files...")
         curr_subject_count = 0
         subject_data = []
@@ -192,20 +180,19 @@ class MimicIVCollator():
 
         report_columns = [f'report_{i}' for i in range(0,18)]
         all_text =pd.unique(machine_measurments_db[report_columns].values.ravel()).astype(str)
-
+        all_text= np.array([x.lower() if isinstance(x, str) else x for x in all_text])
         for substring in self.categories_of_interest:
             string_exists = any(substring in s for s in all_text)
             if string_exists:
                 row_matches = [s for s in all_text if substring in s]
 
-            substring_path = os.path.join(self.out_dir,f"{substring}_match_idxs.csv")
-            if not os.path.exists(substring_path):
+            substring_path = os.path.join(self.out_dir,f"{substring.replace(" ","_")}_match_idxs.csv")
+            if not os.path.exists(substring_path) or (bMatchOverwrite is True):
                 matches = find_matching_rows(machine_measurments_db, report_columns, row_matches)
                 matches = pd.Series(matches)
                 matches.columns = ['substring']
                 matches.to_csv(substring_path,index=False)
-            else:
-                matches = pd.read_csv(substring_path,index_col=None)
+            matches = pd.read_csv(substring_path,index_col=None)
 
             curr_substring_df = filtered_record_list.loc[matches['0']]
             curr_substring_measurement_df = machine_measurments_db.iloc[matches['0']]
@@ -221,7 +208,6 @@ class MimicIVCollator():
             matching_records = waveform_dataset_RECORDS.iloc[matching_indices]
 
         for curr_record in matching_records[0]:
-            # subj_id_waveform_dataset = waveform_dataset_RECORDS[waveform_dataset_RECORDS[0].str.contains(curr_record, case=False, na=False)]
             subj_id_ecg_dataset = int(curr_record.rpartition('/')[0].rpartition('/')[-1][1:])
             if self.num_subjects > len(matching_records[0]):
                 self.num_subjects = len(matching_records[0])
@@ -238,19 +224,19 @@ class MimicIVCollator():
                 folder_header = wfdb.rdheader(record_name=hea_file[:-4], pn_dir=curr_pn_dir)
             except Exception as e:
                 print(f"Failed to load header {curr_pn_dir}/{hea_file[:-4]}: {e}")   
-
+            
             k = len(folder_header.seg_len)
             seg_len = np.array(folder_header.seg_len)
             top_k_indices = np.argsort(-seg_len)[:k]
 
-
-            # for rec_id,current_subject_record in zip(find_subject_files['file_name'],find_subject_files['path']):
             for pos in top_k_indices:
                 curr_record_name = folder_header.seg_name[pos]
+                if curr_record_name == '~':
+                    continue
                 file_header = wfdb.rdheader(record_name=f"{curr_record_name}", pn_dir=curr_pn_dir)
                 sig_names = file_header.sig_name
                 
-                if sig_names is None:
+                if (sig_names is None):
                     continue
                 
                 # Check PPG + ECG presence
@@ -262,7 +248,7 @@ class MimicIVCollator():
                 # if not arterial_signals:
                 #     continue
                 break
-            
+
             max_duration = file_header.sig_len
             max_freq = file_header.fs
 
@@ -279,21 +265,20 @@ class MimicIVCollator():
                 file_id = hea_file[:-4]
                 record = wfdb.rdrecord(rec_id, pn_dir=curr_pn_dir,sampto=MIN_LEN)
                 sig_names = record.sig_name
-
-
+                
                 filtered_df = curr_substring_measurement_df[curr_substring_measurement_df['subject_id'] == subj_id_ecg_dataset]
                 concatenated_strings = filtered_df[report_columns].fillna('').apply(
                     lambda row: ' '.join(str(cell) for cell in row),
                     axis=1)
-                unique_strings = concatenated_strings.unique().tolist()
-                
+                unique_notes = concatenated_strings.unique().tolist()
+            
                 subj_data = {
                     'fix': {
                         'subj_id': subj_id,
                         'rec_id': rec_id,
                         'files': file_id,
                         'af_status': -1,
-                        'subject_notes':unique_strings
+                        'subject_notes':unique_notes
                     },
                     'ppg': {},
                     'ekg': {},
@@ -321,7 +306,6 @@ class MimicIVCollator():
                 
             except Exception as e:
                 print(f"Failed to read record {rec_id}: {e}")
-            print(f'Num Subjects {curr_subject_count}/{self.num_subjects}')
         savemat(self.out_path, {'data': subject_data})
         print(f"Saved structured data with {len(subject_data)} entries to {self.out_path}")
 
@@ -338,7 +322,7 @@ if __name__ == "__main__":
             }
         },
         "ethnicity_extract": False,  # Set True to download and include metadata
-        "num_subjects": 10000,
+        "num_subjects": 30,
         "mimic_info": {
             "mimic_num": "4",
             "mimic_path": mimc4_path,
