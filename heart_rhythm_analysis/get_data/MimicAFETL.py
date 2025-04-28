@@ -40,15 +40,24 @@ class MimicAFETL:
             if not hasattr(sig_obj, "v"):
                 continue
 
-            data = clean_signal(sig_obj.v)
-            if data is None:
-                continue
-            ppg = data 
             fs = float(sig_obj.fs)
             win_samples = int(self.window_size_sec * fs)
-            for i in range(len(ppg) // win_samples):
+            ppg_data = sig_obj.v
+
+            ekg_obj = getattr(rec, "ekg", None)
+            if not hasattr(ekg_obj, "v"):
+                continue
+
+            ekg_data  = ekg_obj.v
+            ekg_fs = float(ekg_obj.fs)
+            ekg_win_samples = int(self.window_size_sec * fs)
+            for i in range(len(ppg_data) // win_samples):
                 start, end = i*win_samples, (i+1)*win_samples
-                raw_win = ppg[start:end]
+                start_ekg,end_ekg = i*ekg_win_samples, (i+1)*ekg_win_samples
+
+                raw_win = ppg_data[start:end]
+                raw_ekg = ekg_data[start_ekg:end_ekg]
+
                 x = clean_signal(raw_win)
                 if x is None: continue
                 if (self.bdecimate_signal) is False or (self.bdecimate_signal is None):
@@ -68,10 +77,12 @@ class MimicAFETL:
                     'subject': f'{subj_id}',
                     'rec_id': f'{rec_id}',
                     'window_id': win_id,
+                    'ppg_fs': self.fs_out,
                     'raw_ppg': raw_win,
                     'proc_ppg': x,
                     'y':y_peaks,
-                    'fs': self.fs_out,
+                    'ekg_fs': ekg_fs,
+                    'raw_ekg': raw_ekg,
                     'label': af_status,
                     'notes': notes
                 })
@@ -84,8 +95,10 @@ class MimicAFETL:
                 win_grp = subj_grp.create_group(win['window_id'])
                 win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
                 win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
+                win_grp.create_dataset('raw_ekg', data=win['raw_ekg'], compression='gzip')
                 win_grp.create_dataset('y', data=win['y'], compression='gzip')
-                win_grp.attrs['fs'] = win['fs']
+                win_grp.attrs['ppg_fs'] = win['ppg_fs']
+                win_grp.attrs['ekg_fs'] = win['ekg_fs']
                 win_grp.attrs['rec_id'] = win['rec_id']
                 win_grp.attrs['label'] = win['label']
                 try:

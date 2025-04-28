@@ -51,7 +51,7 @@ class MimicIVCollator():
         self.ecg_ppg_labels = ['Pleth','II']
         self.Arterial_blood_pressure_labels = ['ABP','ART']
         # self.categories_of_interest = ["fibrillation","sinus rhythm"]
-        self.categories_of_interest = ["fibrillation"]
+        self.categories_of_interest = ["sinus rhythm"]
         
         self.out_path = os.path.join(self.root_dir, f"mimic{self.mimic_num}_{self.categories_of_interest[0] if self.categories_of_interest is not None else ''}_struct.mat")
     
