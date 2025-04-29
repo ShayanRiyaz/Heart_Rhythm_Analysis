@@ -13,16 +13,36 @@ The purpose of this project is to explore Heart Rhythms using:
 
 ## Goal:
 
-### Step 1) Using Deep Learning to PPG Peaks 
-![Current Status](image.png)
+
 
 ## Dataset
 Currently I am using small AFib/NSR Dataset (~35 subjects) from the MIMIC III via physionet. I converted **[Peter Charlton's](https://github.com/peterhcharlton/ppg-beats)** [collate_mimic_perform_af_dataset](https://github.com/peterhcharlton/ppg-beats/blob/main/source/collate_mimic_perform_af_dataset.m) script for extracting the data from Matlab to python. (Using a max of LLMs and my own intuiton). Next I used the [MSPTDfast](https://iopscience.iop.org/article/10.1088/1361-6579/adb89e) peak detection [algorithm](https://github.com/peterhcharlton/ppg-beats/blob/main/source/msptdfastv2_beat_detector.m) (again by Peter Charlton & again converted using LLM and my own understanding of the algorithm.). 
-**Future Plans**: Add more datasets to train and test model.
+
+**Datasets Prepared:**
+- Training and Validation
+    - MIMIC III AFib and Sinus Rhythm Subset (~35 subejects)
+    - MIMIC IV AFib and Sinus Rhythm Subject (~50 Subjects)
+  
+- Testing
+  - CapnoBase 
 
 
 ## Model Development
-- 
+- Currently i created a dummy Conv1D net for peak detection for PPG Signals. (not sure if its necessary but a good learnign exercise).
+### Result
+![Current Status](assets/image.png)
+
+Goals:
+- Noisy Frame Detection using Deep Learning + Simple Statistical Measurments 
+- Peak Detection using Semi-supervised (pre-labeled using MSPTDfast algorithm) + Reinforcement learning based on physiological behaviour of pleth.
+- Calculation of Features such as:
+  - Time-domain: HRV (Heart Rate Variability), mean HR, PTT (Pulse Transit Time)
+  - Morphological: Pulse amplitude, rising time, dicrotic notch position
+  - ?
+(Still Studying)
+- Some Type of Causal Modeling Architecture (X features, treatment) → outcome using TarNet
+- Purpose of Causal Modeling: Predicting patient deterioration, alarm risk, personalization
+
 
 
 ## References
