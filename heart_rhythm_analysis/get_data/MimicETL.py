@@ -2,10 +2,11 @@ import os
 import scipy.io as sio
 import numpy as np
 import h5py
-import uuid
-from utils.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal,pseudo_peak_vector
 
-class MimicAFETL:
+import uuid
+from heart_rhythm_analysis.utils.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal,pseudo_peak_vector
+
+class MimicETL:
     def __init__(self, config):
         self.input_dir = config["input_dir"]
         self.output_dir = config["output_dir"]
@@ -18,7 +19,7 @@ class MimicAFETL:
         self.out_filename = config.get("out_filename", True)
         self.windows_data = []  # list of dicts
         self.scale_type = config.get("scale_type", None)
-        self.bdecimate_signal = None 
+        self.bdecimate_signal =  config.get("decimate_signal", False)
         
     def extract(self):
         print(f"Loading {self.input_dir}")
@@ -60,7 +61,7 @@ class MimicAFETL:
 
                 x = clean_signal(raw_win)
                 if x is None: continue
-                if (self.bdecimate_signal) is False or (self.bdecimate_signal is None):
+                if (self.bdecimate_signal is True):
                     x = decimate_signal(x,
                                         fs_in=fs, fs_out=self.fs_out,
                                         cutoff=self.lowpass_cutoff,
@@ -68,6 +69,7 @@ class MimicAFETL:
                                         zero_phase=self.zero_phase)
                 else: 
                     self.fs_out = fs
+
                 if self.scale_type is not None:
                     scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
                     x = scale_signal(x, config = scaling_config, method = self.scale_type)
