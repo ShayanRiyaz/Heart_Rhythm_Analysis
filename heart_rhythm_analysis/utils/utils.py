@@ -1,5 +1,5 @@
 import torch
-from peak_detectors.mmpvd2 import MSPTDFastV2BeatDetector
+from heart_rhythm_analysis.peak_detectors.mmpvd2 import MSPTDFastV2BeatDetector
 import numpy as np 
 from torch.utils.data import Dataset
 import h5py

@@ -7,7 +7,9 @@ import uuid
 import zarr
 import h5py
 import pandas as pd
-from utils.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal,pseudo_peak_vector
+import heart_rhythm_analysis 
+from heart_rhythm_analysis.peak_detectors.mmpvd2 import MSPTDFastV2BeatDetector
+from heart_rhythm_analysis.utils.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal,pseudo_peak_vector
 
 class CapnoBaseETL:
     """
@@ -24,7 +26,8 @@ class CapnoBaseETL:
         self.zero_phase = config.get("zero_phase", True)
         self.out_filename = config.get("out_filename", 'CapnoBaseETL')
         self.windows_data = []  # list of dicts
-        self.scale_type = "norm"
+        self.scale_type = config.get("scale_type", None)
+        self.bdecimate_signal = None 
 
     def extract(self, filepath):
         try:
@@ -36,42 +39,71 @@ class CapnoBaseETL:
         if is_hdf5:
             f = mat
             grp = f['signal']
+            # PPG
             pleth_obj = grp['pleth']
             if isinstance(pleth_obj, h5py.Dataset):
                 ppg = pleth_obj[()].squeeze()
             else:
                 ds_name = next((k for k,v in pleth_obj.items() if isinstance(v, h5py.Dataset)), None)
                 ppg = pleth_obj[ds_name][()].squeeze()
-            sr_obj = f['param']['samplingrate']
+            sr_obj = f['param']['samplingrate']['pleth']
             if isinstance(sr_obj, h5py.Dataset):
                 sr_data = sr_obj[()]
             else:
                 ds = next(v for v in sr_obj.values() if isinstance(v, h5py.Dataset))
                 sr_data = ds[()]
-            fs = float(np.array(sr_data).flat[0])
+            ppg_fs = float(np.array(sr_data).flat[0])
+
+            # ECG
+            ekg_obj = grp['ecg']
+            if isinstance(ekg_obj, h5py.Dataset):
+                ekg = ekg_obj[()].squeeze()
+            else:
+                ds_name = next((k for k,v in ekg_obj.items() if isinstance(v, h5py.Dataset)), None)
+                ekg = ekg_obj[ds_name][()].squeeze()
+            sr_obj = f['param']['samplingrate']['ecg']
+            if isinstance(sr_obj, h5py.Dataset):
+                sr_data = sr_obj[()]
+            else:
+                ds = next(v for v in sr_obj.values() if isinstance(v, h5py.Dataset))
+                sr_data = ds[()]
+            ekg_fs = float(np.array(sr_data).flat[0])
+
             f.close()
         else:
             ppg = np.squeeze(mat.get('Pleth', np.array([])))
-            fs = float(mat.get('Fs', [[self.fs_in]])[0][0])
-        return {'ppg': ppg, 'fs': fs,
+            ekg = np.squeeze(mat.get('ecg', np.array([])))
+            ppg_fs = float(mat.get('ppg_fs', [[self.fs_in]])[0][0])
+            ppg_fs = float(mat.get('ekg_fs', [[self.fs_in]])[0][0])
+        return {'ppg': ppg, 
+                'ppg_fs': ppg_fs,
+                'ekg': ekg,
+                'ekg_fs': ekg_fs,
                 'subject': os.path.splitext(os.path.basename(filepath))[0]}
 
     def transform(self, raw):
-        ppg, fs = raw['ppg'], raw['fs']
-        win_samples = int(self.window_size_sec * fs)
+        ppg, ppg_fs,ekg,ekg_fs = raw['ppg'], raw['ppg_fs'],raw['ekg'], raw['ekg_fs']
+        win_samples = int(self.window_size_sec * ppg_fs)
+        notes = ""
         for i in range(len(ppg) // win_samples):
             start, end = i*win_samples, (i+1)*win_samples
             raw_win = ppg[start:end]
-            cleaned = clean_signal(raw_win)
-            if cleaned is None: continue
-            dec = decimate_signal(cleaned,
-                                 fs_in=fs, fs_out=self.fs_out,
-                                 cutoff=self.lowpass_cutoff,
-                                 numtaps=self.fir_numtaps,
-                                 zero_phase=self.zero_phase)
-            scaling_config = find_sliding_window(len(dec), target_windows = 5, overlap=25)
-            x = scale_signal(dec, config = scaling_config, method = self.scale_type)
-            y_peaks = pseudo_peak_vector(dec)    # convert back to numpy
+            raw_ekg = ekg[start:end]
+            x = clean_signal(raw_win)
+            if x is None: continue
+            if (self.bdecimate_signal) is False or (self.bdecimate_signal is None):
+                x = decimate_signal(x,
+                                    fs_in=ppg_fs, fs_out=self.fs_out,
+                                    cutoff=self.lowpass_cutoff,
+                                    numtaps=self.fir_numtaps,
+                                    zero_phase=self.zero_phase)
+                
+            else: 
+                self.fs_out = ppg_fs
+            if self.scale_type is not None:
+                scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
+                x = scale_signal(x, config = scaling_config, method = self.scale_type)
+            y_peaks = pseudo_peak_vector(x,fs = self.fs_out)    # convert back to numpy
             
             win_id = str(uuid.uuid4())
             self.windows_data.append({
@@ -81,8 +113,11 @@ class CapnoBaseETL:
                 'raw_ppg': raw_win,
                 'proc_ppg': x,
                 'y':y_peaks,
-                'fs': self.fs_out,
-                'label':-1
+                'raw_ekg': raw_ekg,
+                'ppg_fs': self.fs_out,
+                'ekg_fs': ekg_fs,
+                'label':-1,
+                'notes':notes
             })
 
 
@@ -95,9 +130,12 @@ class CapnoBaseETL:
                 win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
                 win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
                 win_grp.create_dataset('y', data=win['y'], compression='gzip')
-                win_grp.attrs['fs'] = win['fs']
+                win_grp.create_dataset('raw_ekg', data=win['raw_ekg'], compression='gzip')
+                win_grp.attrs['ppg_fs'] = win['ppg_fs']
+                win_grp.attrs['ekg_fs'] = win['ekg_fs']
                 win_grp.attrs['rec_id'] = win['rec_id']
                 win_grp.attrs['label'] = win['label']
+                win_grp.attrs['notes'] = win['notes']
         return h5_path
 
     def process_all(self):
@@ -105,3 +143,38 @@ class CapnoBaseETL:
             raw = self.extract(fp)
             self.transform(raw)
         return self.save_h5()
+    
+def main():
+    root_path = os.path.join(f'{os.getcwd()}/data/raw/capnobase/data/mat')
+    out_path = os.path.join(f'{os.getcwd()}/data/processed/length_full/capnobase_db')
+    out_filename = 'capnobase_db'
+    if not os.path.exists(out_path):
+        os.mkdir(out_path)
+
+    fs_in = 100.00
+    fs_out = 20.83
+
+    config = {
+    "input_dir"      : root_path,
+    "output_dir"     : out_path,
+    "window_size_sec": 30,
+    "fs_in"          : fs_in,
+    "fs_out"   : fs_out,
+    "lowpass_cutoff" : (fs_out / 2),
+    "fir_numtaps"    : 129,
+    "scale_type": None,
+    "decimate_signal": None,
+    "zero_phase"     : True,
+    "out_filename" :  out_filename
+}
+    # cfg = {'input_dir': root_path, 'output_dir': out_path}
+    etl = CapnoBaseETL(config)
+    h5file = etl.process_all()
+    print(f"Saved windows HDF5 to {h5file}")
+    # df = load_as_df(out_path,out_filename)
+
+    # display(df.head(10))
+    return
+
+if __name__ == "__main__":
+    main()
