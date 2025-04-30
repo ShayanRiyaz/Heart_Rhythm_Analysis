@@ -20,6 +20,8 @@ class MimicETL:
         self.windows_data = []  # list of dicts
         self.scale_type = config.get("scale_type", None)
         self.bdecimate_signal =  config.get("decimate_signal", False)
+        self.fs_ekg = config.get("fs_ekg",125)
+        self.fs_bp = config.get("fs_bp",62.5)
         
     def extract(self):
         print(f"Loading {self.input_dir}")
@@ -48,16 +50,24 @@ class MimicETL:
             ekg_obj = getattr(rec, "ekg", None)
             if not hasattr(ekg_obj, "v"):
                 continue
-
             ekg_data  = ekg_obj.v
-            ekg_fs = float(ekg_obj.fs)
-            ekg_win_samples = int(self.window_size_sec * fs)
+            ekg_fs =self.fs_ekg #float(ekg_obj.fs)
+            ekg_win_samples = int(self.window_size_sec * ekg_fs)
+
+            abp_obj = getattr(rec, "bp", None)
+            if not hasattr(abp_obj, "v"):
+                continue
+            abp_data  = abp_obj.v
+            abp_fs =self.fs_bp;#float(abp_obj.fs)
+            abp_win_samples = int(self.window_size_sec * abp_fs)
             for i in range(len(ppg_data) // win_samples):
                 start, end = i*win_samples, (i+1)*win_samples
                 start_ekg,end_ekg = i*ekg_win_samples, (i+1)*ekg_win_samples
+                start_abp,end_abp = i*abp_win_samples, (i+1)*abp_win_samples
 
                 raw_win = ppg_data[start:end]
                 raw_ekg = ekg_data[start_ekg:end_ekg]
+                raw_abp = abp_data[start_abp:end_abp]
 
                 x = clean_signal(raw_win)
                 if x is None: continue
@@ -85,6 +95,8 @@ class MimicETL:
                     'y':y_peaks,
                     'ekg_fs': ekg_fs,
                     'raw_ekg': raw_ekg,
+                    'raw_abp':raw_abp,
+                    'abp_fs':abp_fs,
                     'label': af_status,
                     'notes': notes
                 })
@@ -98,9 +110,11 @@ class MimicETL:
                 win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
                 win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
                 win_grp.create_dataset('raw_ekg', data=win['raw_ekg'], compression='gzip')
+                win_grp.create_dataset('raw_abp', data=win['raw_abp'], compression='gzip')
                 win_grp.create_dataset('y', data=win['y'], compression='gzip')
                 win_grp.attrs['ppg_fs'] = win['ppg_fs']
                 win_grp.attrs['ekg_fs'] = win['ekg_fs']
+                win_grp.attrs['abp_fs'] = win['abp_fs']
                 win_grp.attrs['rec_id'] = win['rec_id']
                 win_grp.attrs['label'] = win['label']
                 try:
@@ -115,3 +129,33 @@ class MimicETL:
         self.transform(raws)
         return self.save_h5()
 
+
+def main():
+    mimic_num = "3"
+    root_path = os.path.join(f'data/raw/mimic{mimic_num}_data/_mimic{mimic_num}_struct.mat')
+    out_filename = f'mimic{mimic_num}_db'
+    out_path = os.path.join(f'../data/processed/length_full/{out_filename}')
+    
+    if not os.path.exists(out_path):
+        os.mkdir(out_path)
+    config = {
+        "input_dir": root_path,
+        "output_dir":  out_path,
+        "fs_in": 125.00,
+        "fs_out": 20.83,
+        'fs_ekg': 125,
+        "window_size_sec": 30,
+        "scale_type": "norm",
+        "decimate_signal": True,
+        "zero_phase": True,
+        "out_filename": out_filename 
+        
+    }
+    bSetUpDB = True
+    if bSetUpDB:
+        etl = MimicETL(config)
+        out_file = etl.process()
+        print("Saved General MIMIC III windows to", out_file)
+    return
+if __name__ == "__main__":
+    main()

@@ -312,7 +312,7 @@ class MimicIVCollator():
                 subj_data['ppg']['method'] = 'PPG from .hea/.dat'
 
                 subj_data['ekg']['v'] = record.p_signal[:, sig_names.index(self.ecg_ppg_labels[1])]
-                subj_data['ekg']['fs'] = record.fs*2
+                subj_data['ekg']['fs'] = 125;#record.fs*
                 subj_data['ekg']['method'] = 'ECG from lead II'
                 subj_data['ekg']['label'] = 'II'
 
