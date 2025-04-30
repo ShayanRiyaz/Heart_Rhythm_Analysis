@@ -28,6 +28,9 @@ class MimicIVCollator():
         self.ethnicity_extract = config.get("ethnicity_extract", False)
         self.num_subjects =config.get("num_subjects", 200)
         self.bVerbose = verbose
+        self.custom_records = config.get("custom_records",{})
+        if bool(self.custom_records) is False:
+            self.custom_records['name'] = None
 
         self.ethnicity_data = None
 
@@ -39,11 +42,18 @@ class MimicIVCollator():
         self.ecg_ppg_labels = ['pleth','ii']
         self.Arterial_blood_pressure_labels = ['abp','art']
         self.categories_of_interest = config.get("substring_to_match",["sinus rhythm"])
+        if self.mimic_num != "4":
+            self.categories_of_interest = []
+
+        
         if len(self.categories_of_interest) > 1:
             self.categories_of_interest = self.categories_of_interest[0]
-            self.out_path = os.path.join(self.root_dir, f"{self.outfile_version}_mimic{self.mimic_num}_{self.categories_of_interest.replace(" ","_") if len(self.categories_of_interest) != 0  else ''}_struct.mat")
+            out_filename =  f"{self.outfile_version}_mimic{self.mimic_num}_{self.categories_of_interest.replace(" ","_") if len(self.categories_of_interest) != 0  else ''}_struct.mat"
+            self.out_path = os.path.join(self.root_dir,out_filename)
         else:
-            self.out_path = os.path.join(self.root_dir, f"{self.outfile_version}_mimic{self.mimic_num}_struct.mat")
+            out_filename = f"{self.outfile_version}_mimic{self.mimic_num}'{self.custom_records['name'] if self.custom_records['name'] is not None else ""}'_struct.mat"
+            self.out_path = os.path.join(self.root_dir,out_filename )
+
 
     def collate_dataset(self, load_metadata=True, load_waveforms=True, download_waveforms=False):
         print(f"\n ~~~ Downloading and collating MIMIC {self.mimic_num} matched waveform subset ~~~")
@@ -58,20 +68,10 @@ class MimicIVCollator():
 
         if download_waveforms:
             self.download_dataset()
-        else:
-            records = pd.read_table(os.path.join(self.out_dir,'RECORDS'))
-            if self.mimic_num == "3":
-                records_db = []
-                machine_measurments_db = []
-            elif self.mimic_num == "4":
-                records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
-                dtype_cols = { 
-                    16: str, 17: str, 18: str, 19: str, 20: str, 21: str 
-                }
-                machine_measurments_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'),dtype=dtype_cols)
 
+        match_records = self.prepare_record_list()
         if load_waveforms:
-            self.scan_waveform_directory(records,records_db,machine_measurments_db)
+            self.scan_waveform_directory(match_records)
 
     def setup_paths(self):
         print("\n - Setting up parameters")
@@ -145,29 +145,43 @@ class MimicIVCollator():
                 for chunk in file_response.iter_content(chunk_size=8192):
                     f.write(chunk)
         print("Download complete.")
-        
-    def scan_waveform_directory(self,records,records_db,machine_measurments_db):
-        bMatchOverwrite = True
-        print("Scanning for waveform files...")
-        curr_subject_count = 0
-        subject_data = []
 
+    def prepare_record_list(self):
+        df_categories = {}
+        if self.mimic_num == "3":
+            records_db = []
+            machine_measurments_db = []
+        elif self.mimic_num == "4":
+            records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
+            dtype_cols = { 
+                16: str, 17: str, 18: str, 19: str, 20: str, 21: str 
+            }
+            machine_measurments_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'),dtype=dtype_cols)
+        
+        bMatchOverwrite = True
         waveform_dataset_RECORDS = pd.read_csv(f"https://physionet.org/files/{self.mimic_path}/RECORDS",header=None)
-        waveform_subject_ids = (
+        subjects_series = (
             waveform_dataset_RECORDS[0]
-            .str.rsplit("/", n=2)  # split from the right at most twice → ["…", "p12345", "xyz.hea"]
-            .str[1]                 # pick the middle element → "p12345"
-            .str.lstrip("p")        # drop only the leading "p" → "12345"
-            .tolist()
+            .str.rsplit("/", n=2)  
+            .str[1]                 
+            .str.lstrip("p")        
         )
-        if (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
-            report_columns = [f'report_{i}' for i in range(0,18)]
-            flat = machine_measurments_db[report_columns].values.ravel().astype(str)
+        if self.mimic_num == "3":
+            df_categories['matching_records'] = waveform_dataset_RECORDS[0]
+            if len(self.custom_records) > 0:
+                custom_filnames_df = pd.Series(self.custom_records['filename']).str.split('-', expand=True)
+                custom_filnames_df.columns = ['subject_id', 'year', 'month', 'day', 'hour', 'minute']
+                subjects_of_interest = custom_filnames_df['subject_id'].str.lstrip("p")
+                lookup = {val: idx for idx, val in enumerate(subjects_series)}
+                positions = [lookup[x] for x in subjects_of_interest if x in lookup]
+                df_categories['matching_records'] = df_categories['matching_records'][positions]
+        elif (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
+            df_categories['report_columns'] = [f'report_{i}' for i in range(0,18)]
+            flat = machine_measurments_db[df_categories['report_columns']].values.ravel().astype(str)
             all_text= np.unique(np.char.lower(flat))
             filtered_record_list = records_db.merge(machine_measurments_db[['subject_id', 'study_id']],
                                                     on=['subject_id', 'study_id'],
-                                                    how='inner'
-            )
+                                                    how='inner')
             for substring in self.categories_of_interest:
                 string_exists = any(substring in s for s in all_text)
                 if string_exists:
@@ -175,26 +189,60 @@ class MimicIVCollator():
 
                 substring_path = os.path.join(self.out_dir,f"{substring.replace(" ","_")}_match_idxs.csv")
                 if not os.path.exists(substring_path) or (bMatchOverwrite is True):
-                    matches = pd.Series(find_matching_rows(machine_measurments_db, report_columns, row_matches))
+                    matches = pd.Series(find_matching_rows(machine_measurments_db, df_categories['report_columns'], row_matches))
                     matches.columns = ['substring']
                     matches.to_csv(substring_path,index=False)
                 matches = pd.read_csv(substring_path,index_col=None)
 
                 curr_substring_df = filtered_record_list.loc[matches['0']]
-                curr_substring_measurement_df = machine_measurments_db.iloc[matches['0']]
-
-                subjects_series = (
-                    waveform_dataset_RECORDS[0]
-                    .str.rsplit("/", n=2)  
-                    .str[1]                 
-                    .str.lstrip("p")        
-                )
+                df_categories['curr_substring_measurement_df'] = machine_measurments_db.iloc[matches['0']]
                 unique_subjects = (curr_substring_df['subject_id'].astype(str).unique())
                 mask = subjects_series.isin(unique_subjects)
-                matching_records = waveform_dataset_RECORDS.loc[mask, 0]
-        else:
-            matching_records = waveform_dataset_RECORDS[0]
+                df_categories['matching_records'] = waveform_dataset_RECORDS.loc[mask, 0]
 
+        return df_categories
+    
+    def scan_waveform_directory(self,df_categories):
+        
+        print("Scanning for waveform files...")
+        curr_subject_count = 0
+        subject_data = []
+
+        # waveform_dataset_RECORDS = pd.read_csv(f"https://physionet.org/files/{self.mimic_path}/RECORDS",header=None)
+        # if (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
+        #     report_columns = [f'report_{i}' for i in range(0,18)]
+        #     flat = machine_measurments_db[report_columns].values.ravel().astype(str)
+        #     all_text= np.unique(np.char.lower(flat))
+        #     filtered_record_list = records_db.merge(machine_measurments_db[['subject_id', 'study_id']],
+        #                                             on=['subject_id', 'study_id'],
+        #                                             how='inner')
+        #     for substring in self.categories_of_interest:
+        #         string_exists = any(substring in s for s in all_text)
+        #         if string_exists:
+        #             row_matches = [s for s in all_text if substring in s]
+
+        #         substring_path = os.path.join(self.out_dir,f"{substring.replace(" ","_")}_match_idxs.csv")
+        #         if not os.path.exists(substring_path) or (bMatchOverwrite is True):
+        #             matches = pd.Series(find_matching_rows(machine_measurments_db, report_columns, row_matches))
+        #             matches.columns = ['substring']
+        #             matches.to_csv(substring_path,index=False)
+        #         matches = pd.read_csv(substring_path,index_col=None)
+
+        #         curr_substring_df = filtered_record_list.loc[matches['0']]
+        #         curr_substring_measurement_df = machine_measurments_db.iloc[matches['0']]
+
+        #         subjects_series = (
+        #             waveform_dataset_RECORDS[0]
+        #             .str.rsplit("/", n=2)  
+        #             .str[1]                 
+        #             .str.lstrip("p")        
+        #         )
+        #         unique_subjects = (curr_substring_df['subject_id'].astype(str).unique())
+        #         mask = subjects_series.isin(unique_subjects)
+        #         matching_records = waveform_dataset_RECORDS.loc[mask, 0]
+        # else:
+        #     matching_records = waveform_dataset_RECORDS[0]
+        matching_records = df_categories['matching_records']
         total_subjects_available = len(matching_records)
         if self.num_subjects > len(matching_records):
                 self.num_subjects = len(matching_records)
@@ -282,8 +330,9 @@ class MimicIVCollator():
                 
                 unique_notes = ""
                 if (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
+                    curr_substring_measurement_df = df_categories['curr_substring_measurement_df']
                     filtered_df = curr_substring_measurement_df[curr_substring_measurement_df['subject_id'] == subj_id_ecg_dataset]
-                    concatenated_strings = filtered_df[report_columns].fillna('').apply(
+                    concatenated_strings = filtered_df[df_categories['report_columns']].fillna('').apply(
                         lambda row: ' '.join(str(cell) for cell in row),
                         axis=1)
                     unique_notes = concatenated_strings.unique().tolist()
@@ -327,13 +376,14 @@ class MimicIVCollator():
 if __name__ == "__main__":
     
     mimic_num = "3"
-    bCustomRecords = False
-    custom_records =     []
+    bCustomRecords = True
+    custom_records =     {}
     if mimic_num == "3":
         mimic_path = 'mimic3wdb-matched/1.0/'
         if bCustomRecords:
-            custom_records.label = [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1], 
-            custom_records.file = ['p000608-2167-03-09-11-54','p000776-2184-04-30-15-16', 'p000946-2120-05-14-08-08', 'p004490-2151-01-07-12-36', 'p004829-2103-08-30-21-52', 'p075796-2198-07-25-23-40', 'p009526-2113-11-17-02-12', 'p010391-2183-12-25-10-15', 'p013072-2194-01-22-16-13', 'p013136-2133-11-09-16-58', 'p014079-2182-09-24-13-41', 'p015852-2148-05-03-18-39', 'p016684-2188-01-29-00-06', 'p017344-2169-07-17-17-32', 'p019608-2125-02-05-04-57', 'p022954-2136-02-29-17-52', 'p023824-2182-11-27-14-22', 'p025117-2202-03-15-20-28', 'p026377-2111-11-17-16-46', 'p026964-2147-01-11-18-03', 'p029512-2188-02-27-18-10', 'p043613-2185-01-18-23-52', 'p050089-2157-08-23-16-37', 'p050384-2195-01-30-02-21', 'p055204-2132-06-30-09-34', 'p058932-2120-10-13-23-15', 'p062160-2153-10-03-14-49', 'p063039-2157-03-29-13-35', 'p063628-2176-07-02-20-38', 'p068956-2107-04-21-16-05', 'p069339-2133-12-09-21-14', 'p075371-2119-08-22-00-53', 'p077729-2120-08-31-01-03', 'p087275-2108-08-29-12-53', 'p079998-2101-10-21-21-31', 'p081349-2120-02-11-06-35', 'p085866-2178-03-20-17-11', 'p087675-2104-12-05-03-53', 'p089565-2174-05-12-00-07', 'p089964-2154-05-21-14-53', 'p092289-2183-03-17-23-12', 'p092846-2129-12-21-13-12', 'p094847-2112-02-12-19-56', 'p097547-2125-10-21-23-43', 'p099674-2105-06-13-00-07']
+            custom_records['name']= 'af_nsr'
+            custom_records['label'] = [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1], 
+            custom_records['filename'] = ['p000608-2167-03-09-11-54','p000776-2184-04-30-15-16', 'p000946-2120-05-14-08-08', 'p004490-2151-01-07-12-36', 'p004829-2103-08-30-21-52', 'p075796-2198-07-25-23-40', 'p009526-2113-11-17-02-12', 'p010391-2183-12-25-10-15', 'p013072-2194-01-22-16-13', 'p013136-2133-11-09-16-58', 'p014079-2182-09-24-13-41', 'p015852-2148-05-03-18-39', 'p016684-2188-01-29-00-06', 'p017344-2169-07-17-17-32', 'p019608-2125-02-05-04-57', 'p022954-2136-02-29-17-52', 'p023824-2182-11-27-14-22', 'p025117-2202-03-15-20-28', 'p026377-2111-11-17-16-46', 'p026964-2147-01-11-18-03', 'p029512-2188-02-27-18-10', 'p043613-2185-01-18-23-52', 'p050089-2157-08-23-16-37', 'p050384-2195-01-30-02-21', 'p055204-2132-06-30-09-34', 'p058932-2120-10-13-23-15', 'p062160-2153-10-03-14-49', 'p063039-2157-03-29-13-35', 'p063628-2176-07-02-20-38', 'p068956-2107-04-21-16-05', 'p069339-2133-12-09-21-14', 'p075371-2119-08-22-00-53', 'p077729-2120-08-31-01-03', 'p087275-2108-08-29-12-53', 'p079998-2101-10-21-21-31', 'p081349-2120-02-11-06-35', 'p085866-2178-03-20-17-11', 'p087675-2104-12-05-03-53', 'p089565-2174-05-12-00-07', 'p089964-2154-05-21-14-53', 'p092289-2183-03-17-23-12', 'p092846-2129-12-21-13-12', 'p094847-2112-02-12-19-56', 'p097547-2125-10-21-23-43', 'p099674-2105-06-13-00-07']
     elif mimic_num == "4":
         mimic_path = 'mimic4wdb/0.1.0/'#'https://physionet.org/files/mimic-iv-ecg/1.0/'
 
