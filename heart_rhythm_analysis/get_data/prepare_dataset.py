@@ -29,6 +29,7 @@ def save_windows_to_h5(windows, output_path):
                 group.create_dataset(key, data=value)
             for attr_key, attr_val in win['attrs'].items():
                 group.attrs[attr_key] = attr_val
+    hf.close()
 
 def my_split_and_save(file_paths: List[str], train_ratio: float = 0.8, output_dir: str = "."):
     all_windows = load_all_windows_from_h5(file_paths)
@@ -36,8 +37,8 @@ def my_split_and_save(file_paths: List[str], train_ratio: float = 0.8, output_di
     train_windows = all_windows[:split_index]
     test_windows = all_windows[split_index:]
 
-    train_path = os.path.join(output_dir, "train_datasett.h5")
-    test_path = os.path.join(output_dir, "test_datasett.h5")
+    train_path = os.path.join(output_dir, "train_dataset.h5")
+    test_path = os.path.join(output_dir, "test_dataset.h5")
 
     save_windows_to_h5(train_windows, train_path)
     save_windows_to_h5(test_windows, test_path)

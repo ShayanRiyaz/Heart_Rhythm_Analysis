@@ -12,8 +12,8 @@ from scipy.signal import firwin, filtfilt, lfilter, resample, resample_poly
 def decimate_signal(x: np.ndarray,
                     fs_in: float,
                     fs_out: float,
-                    cutoff: float = None,
-                    numtaps: int = 129,
+                    cutoff: list[float,float] = None,
+                    numtaps: int = 31,
                     zero_phase: bool = True) -> np.ndarray:
     """
     Down-sample a 1-D signal from fs_in to fs_out.
@@ -44,7 +44,12 @@ def decimate_signal(x: np.ndarray,
     if abs(ratio - round(ratio)) < 1e-6:
         factor = int(round(ratio))
         # design anti-alias FIR at original rate
-        h = firwin(numtaps, cutoff, fs=fs_in)
+        # numtaps = 31  # e.g., keep it short relative to signal window
+        # cutoff = [0.3, 8]  # bandpass range in Hz
+        if len(x) < 3 * numtaps:
+            raise ValueError(f"Signal too short ({len(x)} samples) for {numtaps}-tap filter")
+
+        h = firwin(numtaps, cutoff, pass_zero=False, fs=fs_in)
         filt = filtfilt if zero_phase else lfilter
         x_filt = filt(h, 1.0, x)
         return x_filt[::factor]
@@ -124,7 +129,7 @@ from typing import Callable, Tuple, Optional
 
 def scale_signal(
     input_vector: np.ndarray,
-    config: Tuple[int, int, int],
+    config: Tuple[int, int, int] = None,
     window_fn: Optional[Callable[[int], np.ndarray]] = None,
     method: str = 'norm'
 ) -> np.ndarray:
@@ -146,7 +151,10 @@ def scale_signal(
         raise ValueError("input_vector must be 1-D")
 
     N = input_vector.shape[0]
-    window_size, hop_size, _ = config
+    if config is None:
+        window_size = hop_size = N
+    else:
+        window_size,hop_size, _ = config
 
     # default to flat window
     if window_fn is None:
@@ -221,6 +229,7 @@ class PPGWindow(Dataset):
         win_len: the length you want every window to be
         transform: optional callable applied to proc_ppg Tensor
         """
+        
         self.h5_path = h5_path
         self.win_len = win_len
         self.h5 = h5py.File(h5_path, 'r', swmr=True)
@@ -247,16 +256,15 @@ class PPGWindow(Dataset):
     def __getitem__(self, idx):
         subj, wid = self.index[idx]
         grp = self.h5[subj][wid]
-
         # raw arrays from file
         proc = grp['proc_ppg'][:]    # float32, length maybe ≠ win_len
         y    = grp['y'][:]           # float32, same
         raw  = grp['raw_ppg'][:]     # float64, maybe full trace
 
         # enforce uniform length
-        proc = self._pad_or_trim(proc).astype('float32')
-        y    = self._pad_or_trim(y).astype('float32')
-        raw  = self._pad_or_trim(raw).astype('float32')
+        proc = self._pad_or_trim(proc).astype('float16')
+        y    = self._pad_or_trim(y).astype('float16')
+        # raw  = self._pad_or_trim(raw).astype('float32')
 
         # to torch
         proc_t = torch.from_numpy(proc).float().unsqueeze(0)  # (1, win_len)

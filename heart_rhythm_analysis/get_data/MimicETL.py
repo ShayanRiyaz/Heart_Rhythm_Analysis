@@ -14,7 +14,7 @@ class MimicETL:
         self.fs_in = config.get("fs_in", 125.0)
         self.fs_out = config.get("fs_out",self.fs_in)
         self.lowpass_cutoff = config.get("lowpass_cutoff", 8.0)
-        self.fir_numtaps = config.get("fir_numtaps", 129)
+        self.fir_numtaps = config.get("fir_numtaps", 33)
         self.zero_phase = config.get("zero_phase", True)
         self.out_filename = config.get("out_filename", True)
         self.windows_data = []  # list of dicts
@@ -22,6 +22,10 @@ class MimicETL:
         self.bdecimate_signal =  config.get("decimate_signal", False)
         self.fs_ekg = config.get("fs_ekg",125)
         self.fs_bp = config.get("fs_bp",62.5)
+
+        if self.fs_in == self.fs_out:
+            self.bdecimate_signal = False
+            raise f"fs_in [{self.fs_in}] == fs_out [{self.fs_out}], setting decimate_signal to False"
         
     def extract(self):
         print(f"Loading {self.input_dir}")
@@ -60,11 +64,19 @@ class MimicETL:
             abp_data  = abp_obj.v
             abp_fs =self.fs_bp;#float(abp_obj.fs)
             abp_win_samples = int(self.window_size_sec * abp_fs)
-            for i in range(len(ppg_data) // win_samples):
+
+            n_windows = min(
+            len(ppg_data) // win_samples,
+            len(ekg_data) // ekg_win_samples,
+            len(abp_data) // abp_win_samples
+            )
+            for i in range(n_windows):
                 start, end = i*win_samples, (i+1)*win_samples
                 start_ekg,end_ekg = i*ekg_win_samples, (i+1)*ekg_win_samples
                 start_abp,end_abp = i*abp_win_samples, (i+1)*abp_win_samples
 
+                if end > len(ppg_data) or end_ekg > len(ekg_data) or end_abp > len(abp_data):
+                    continue  # skip incomplete final window
                 raw_win = ppg_data[start:end]
                 raw_ekg = ekg_data[start_ekg:end_ekg]
                 raw_abp = abp_data[start_abp:end_abp]
@@ -81,9 +93,11 @@ class MimicETL:
                     self.fs_out = fs
 
                 if self.scale_type is not None:
-                    scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
+                    scaling_config = None
+                    if len(x) >= 150:
+                        scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
                     x = scale_signal(x, config = scaling_config, method = self.scale_type)
-                y_peaks = pseudo_peak_vector(x,fs = self.fs_out )    # convert back to numpy
+                y = pseudo_peak_vector(x,fs = self.fs_out )    # convert back to numpy
                 win_id = str(uuid.uuid4())
                 self.windows_data.append({
                     'subject': f'{subj_id}',
@@ -92,10 +106,11 @@ class MimicETL:
                     'ppg_fs': self.fs_out,
                     'raw_ppg': raw_win,
                     'proc_ppg': x,
-                    'y':y_peaks,
-                    'ekg_fs': ekg_fs,
+                    'y':y,
                     'raw_ekg': raw_ekg,
                     'raw_abp':raw_abp,
+                    'raw_ppg_fs': self.fs_in,
+                    'ekg_fs': ekg_fs,
                     'abp_fs':abp_fs,
                     'label': af_status,
                     'notes': notes
@@ -113,6 +128,7 @@ class MimicETL:
                 win_grp.create_dataset('raw_abp', data=win['raw_abp'], compression='gzip')
                 win_grp.create_dataset('y', data=win['y'], compression='gzip')
                 win_grp.attrs['ppg_fs'] = win['ppg_fs']
+                win_grp.attrs['raw_ppg_fs'] = win['raw_ppg_fs']
                 win_grp.attrs['ekg_fs'] = win['ekg_fs']
                 win_grp.attrs['abp_fs'] = win['abp_fs']
                 win_grp.attrs['rec_id'] = win['rec_id']

@@ -225,7 +225,6 @@ class MimicIVCollator():
             curr_pn_dir = os.path.join(self.mimic_path,curr_record)
             if self.mimic_num == "4":
                 curr_pn_dir = os.path.join(curr_pn_dir,temp_folder)
-                
             try:
                 folder_header = wfdb.rdheader(record_name=hea_file[:-4], pn_dir=curr_pn_dir)
             except Exception as e:
