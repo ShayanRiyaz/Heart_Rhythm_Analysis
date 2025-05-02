@@ -11,11 +11,16 @@ import wfdb
 from scipy.io import savemat
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-import json
-import glob
 
+
+# one session for the entire module
 session = requests.Session()
+session.headers.update({"User-Agent":"Mozilla/5.0"})
 
+def list_records(mimic_path):
+    url = f"https://physionet.org/files/{mimic_path.rstrip('/')}/RECORDS"
+    df = pd.read_csv(url, header=None, names=['path'])
+    return df['path'].tolist(), df.index.tolist()
 
 def find_matching_rows(df, columns, match_strings):
     pattern = '|'.join(map(re.escape, match_strings))
@@ -25,7 +30,7 @@ def find_matching_rows(df, columns, match_strings):
     row_matches = match_matrix.any(axis=1)
     return df.index[row_matches].tolist()
 
-class MimicCollator():
+class MimicIVCollator():
     def __init__(self, config,verbose = False):
         self.config = config
         self.root_dir = config.get("paths", {}).get("local", {}).get("root_folder",os.getcwd())     # → the value you want, or None if missing
@@ -43,6 +48,7 @@ class MimicCollator():
 
         self.ethnicity_data = None
         self.min_minutes = 60
+        self.min_len_seconds = self.min_minutes * 60  # minutes → seconds
 
 
         if self.mimic_num == "4":
@@ -87,34 +93,17 @@ class MimicCollator():
         elif self.mimic_num == "4":
             match_records = self.prepare_mimic4_record_list()
 
-        # csv_file = f"mimic{self.mimic_num}_{self.num_subjects}_best_records.csv"
-        # csv_path = os.path.join(self.root_dir,csv_file)
-        # if not os.path.exists(csv_path):
-        #     start_time2 = time.time()
-        #     info_df = self.extract_matching_record_info(matching_records=match_records['matching_records'],mimic_path=self.mimic_path,mimic_num=self.mimic_num)
-        #     end_time2 = time.time()-start_time2
-        #     print(f'Total Time to create records_list: {end_time2}')
-        #     info_df.to_csv(csv_path, index=False)
-        #     print(f"Wrote record info to {csv_path}")
-        # else:
-        #     info_df = pd.read_csv(csv_path)
-        existing = self._find_existing_best_records()
-        if existing:
-            info_df = pd.read_csv(existing)
-            print(f"Loaded existing record-info from {existing} (N={os.path.basename(existing)})")
-        else:
-            # no CSV found, so generate it from scratch using self.num_subjects
-            print("No existing best_records file; building a new one for N=", self.num_subjects)
-            
-            info_df = self.extract_matching_record_info(
-                matching_records=match_records['matching_records'],
-                mimic_path=self.mimic_path,
-                mimic_num=self.mimic_num
-            )
-            csv_name = f"mimic{self.mimic_num}_{self.num_subjects}_best_records.csv"
-            csv_path = os.path.join(self.root_dir, csv_name)
+        csv_file = f"mimic{self.mimic_num}_{self.num_subjects}_best_records.csv"
+        csv_path = os.path.join(self.root_dir,csv_file)
+        if not os.path.exists(csv_path):
+            start_time2 = time.time()
+            info_df = self.extract_matching_record_info(matching_records=match_records['matching_records'],mimic_path=self.mimic_path,mimic_num=self.mimic_num)
+            end_time2 = time.time()-start_time2
+            print(f'Total Time to create records_list: {end_time2}')
             info_df.to_csv(csv_path, index=False)
-            print(f"Wrote new record-info to {csv_path}")
+            print(f"Wrote record info to {csv_path}")
+        else:
+            info_df = pd.read_csv(csv_path)
 
         if load_waveforms:
             self.scan_waveform_directory(match_records,record_info = info_df)
@@ -125,7 +114,7 @@ class MimicCollator():
 
     def get_rec_id(self,curr_record):
         url = f"https://physionet.org/files/{self.mimic_path}{curr_record}RECORDS"
-        resp = session.get(url)
+        resp = session.get(url,timeout=5)
         resp.raise_for_status()
         # grab just the first line, strip trailing slash and path
         first = resp.text.splitlines()[0].rstrip("/")
@@ -162,83 +151,68 @@ class MimicCollator():
                     f.write(chunk)
         print("Download complete.")
 
-    def _find_existing_best_records(self):
-        pattern = os.path.join(
-            self.root_dir,
-            f"mimic{self.mimic_num}_*_best_records.csv"
-        )
-        files = glob.glob(pattern)
-        if not files:
-            return None
 
-        # extract the number from each filename and pick the largest
-        rx = re.compile(rf"mimic{self.mimic_num}_(\d+)_best_records\.csv$")
-        best = None
-        best_n = -1
-        for path in files:
-            m = rx.search(os.path.basename(path))
-            if not m:
-                continue
-            n = int(m.group(1))
-            if n > best_n:
-                best_n, best = n, path
-
-        return best  # e.g. "/…/mimic3_200_best_records.csv"
         
     def extract_matching_record_info(self,matching_records, mimic_path, mimic_num):
         infos = []
-        MIN_LEN_FACTOR = self.min_minutes * 60  # minutes → seconds
-        cache_path = os.path.join(self.out_dir, f"mimic{self.mimic_num}_records_cache.json")
+        #
 
-        if os.path.exists(cache_path):
-            with open(cache_path, "r") as f:
-                records_cache = json.load(f)
-        else:
-            records_cache = {}
-            for rec in matching_records:
-                url = f"https://physionet.org/files/{mimic_path}{rec}RECORDS"
-                txt = session.get(url).text
-                folder = txt.splitlines()[0].rstrip("/").rsplit("/", 1)[-1]
-                records_cache[rec] = folder
+        # iterable = (matching_records.items()
+        #             if hasattr(matching_records, "items")
+        #             else enumerate(matching_records))
+        records, indices = list_records(mimic_path)
 
-            with open(cache_path, "w") as f:
-                json.dump(records_cache, f, indent=2)
+        # fire off _all_ the workers at once
+        with ThreadPoolExecutor(max_workers=16) as exe:
+            futures = [
+                exe.submit(self.process_records,idx, rec)
+                for idx, rec in zip(indices, records)
+            ]
 
-        time_start1 = time.time()
-        if isinstance(matching_records, dict):
-            record_list = list(matching_records.values())
-        else:
-            record_list = list(matching_records)
+            infos = []
+            for fut in futures:
+                info = fut.result()
+                if info:
+                    infos.append(info)
+                if len(infos) >= self.num_subjects:
+                    # cancel any remaining work so the pool can shut down
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
 
-        for idx, curr_record in enumerate(record_list):
-            rec_id = records_cache[curr_record]
-            if not rec_id: continue
-            
-            if len(infos) > self.num_subjects:
-                self.num_subjects = len(infos)
-                break
-            subject_and_rec_dir = os.path.join(mimic_path, curr_record)
-            if mimic_num == "3":
+        return pd.DataFrame(infos)
+        
+    def process_records(self,idx,curr_record):
+        # url = f"https://physionet.org/files/{mimic_path}{curr_record}RECORDS"
+        # try:
+        #     rec_id = (pd.read_csv(url, header=None).iloc[0,0].rstrip("/").split("/")[-1])
+        # except:
+        #     continue
+        try:
+            rec_id = self.get_rec_id(curr_record)
+            subject_and_rec_dir = os.path.join(self.mimic_path, curr_record)
+            if self.mimic_num == "3":
                 base_pn_dir = subject_and_rec_dir
                 initial_header =  rec_id[:-2] if rec_id[-1] == "n" else rec_id
-            elif mimic_num == "4":
+            elif self.mimic_num == "4":
                 base_pn_dir = os.path.join(subject_and_rec_dir, rec_id)
                 initial_header = rec_id
             try:
                 signal_length_header = wfdb.rdheader(initial_header, pn_dir=base_pn_dir)
             except Exception as e:
-                continue
+                return None
 
             if (hasattr(signal_length_header, 'seg_name')):
                 if ('~' in signal_length_header.seg_name):
                     indices_to_remove = [i for i, name in enumerate(signal_length_header.seg_name) if name == '~']
                     signal_length_header.seg_name = [name for i, name in enumerate(signal_length_header.seg_name) if i not in indices_to_remove]
                     signal_length_header.seg_len = np.delete(signal_length_header.seg_len, indices_to_remove)
-                     
+                        
             signal_name_file = signal_length_header.seg_name[0]
             if mimic_num == "3":
                 if signal_length_header.record_name[-1] == "n":
-                    continue
+                    return None
             possible_signals_hdr = wfdb.rdheader(signal_name_file, pn_dir=base_pn_dir)
             
             try:
@@ -255,14 +229,14 @@ class MimicCollator():
         
             arterial_signals = [label.lower() for label in self.Arterial_blood_pressure_labels if label  in possible_signals]
 
-            iMinLengthRequired = int(MIN_LEN_FACTOR * 60)
+            iMinLengthRequired = int(self.min_len_seconds* 60)
 
             bNumRecordsCheck = (len(seg_info) < 2)
             bSignalsPresent = (possible_signals is None)
             bEcgPpgPresent = (not all(label.lower() in possible_signals for label in self.ecg_ppg_labels))
             bArterialSignalsPresent = (not arterial_signals)
             if  bNumRecordsCheck or (seg_info[1][1] < iMinLengthRequired) or bSignalsPresent or bEcgPpgPresent or bArterialSignalsPresent:
-                continue
+                return None
 
             for seg_name, seg_len in seg_info:
                 try:
@@ -288,7 +262,8 @@ class MimicCollator():
                 if bSignalsPresent or bEcgPpgPresent or bArterialSignalsPresent:
                     continue
 
-                infos.append({
+                # time_end1 = time.time() - time_start1
+                return {
                     "idx":      idx,
                     "pn_dir":   subject_and_rec_dir,
                     "rec_id":   str(rec_id),
@@ -296,11 +271,9 @@ class MimicCollator():
                     "seg_len":   seg_hdr.sig_len,
                     "max_freq":  max_freq,
                     "signals":   actual_signals
-                })
-                time_end1 = time.time() - time_start1
-                print(f'Time to Store {len(infos)}, Records: {time_end1:.2f}')
-                break
-        return pd.DataFrame(infos)
+                }
+        except Exception as e:
+            print(f'{e}')
 
     def setup_paths(self):
         print("\n - Setting up parameters")
@@ -480,7 +453,7 @@ class MimicCollator():
                 
                 max_duration = file_header.sig_len
                 max_freq = file_header.fs
-                MIN_LEN = int(max_freq * self.min_minutes * 60)
+                MIN_LEN = int(max_freq * self.min_len_seconds)
 
                 if (max_duration < MIN_LEN) or (max_freq < 20):
                     if self.bVerbose: print(f'Total Subjects Available: {total_subjects_available} | Discarded: {curr_pn_dir}{curr_record_name} [ Duration: {max_duration/max_freq/60:.2f} | Signals: {sig_names}]')
@@ -561,7 +534,7 @@ class MimicCollator():
 
 if __name__ == "__main__":
     # mimic_num = "3"
-    for mimic_num in ["3"]:
+    for mimic_num in ["3","4"]:
         MIMIC_3_CUSTOM_DATASET = {}
         MIMIC_3_CUSTOM_DATASET['all_label'] = [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1]
         MIMIC_3_CUSTOM_DATASET['all_filename'] = ['p000608-2167-03-09-11-54','p000776-2184-04-30-15-16', 'p000946-2120-05-14-08-08', 'p004490-2151-01-07-12-36', 'p004829-2103-08-30-21-52', 'p075796-2198-07-25-23-40', 'p009526-2113-11-17-02-12', 'p010391-2183-12-25-10-15', 'p013072-2194-01-22-16-13', 'p013136-2133-11-09-16-58', 'p014079-2182-09-24-13-41', 'p015852-2148-05-03-18-39', 'p016684-2188-01-29-00-06', 'p017344-2169-07-17-17-32', 'p019608-2125-02-05-04-57', 'p022954-2136-02-29-17-52', 'p023824-2182-11-27-14-22', 'p025117-2202-03-15-20-28', 'p026377-2111-11-17-16-46', 'p026964-2147-01-11-18-03', 'p029512-2188-02-27-18-10', 'p043613-2185-01-18-23-52', 'p050089-2157-08-23-16-37', 'p050384-2195-01-30-02-21', 'p055204-2132-06-30-09-34', 'p058932-2120-10-13-23-15', 'p062160-2153-10-03-14-49', 'p063039-2157-03-29-13-35', 'p063628-2176-07-02-20-38', 'p068956-2107-04-21-16-05', 'p069339-2133-12-09-21-14', 'p075371-2119-08-22-00-53', 'p077729-2120-08-31-01-03', 'p087275-2108-08-29-12-53', 'p079998-2101-10-21-21-31', 'p081349-2120-02-11-06-35', 'p085866-2178-03-20-17-11', 'p087675-2104-12-05-03-53', 'p089565-2174-05-12-00-07', 'p089964-2154-05-21-14-53', 'p092289-2183-03-17-23-12', 'p092846-2129-12-21-13-12', 'p094847-2112-02-12-19-56', 'p097547-2125-10-21-23-43', 'p099674-2105-06-13-00-07']
@@ -602,7 +575,7 @@ if __name__ == "__main__":
                 }
             },
             "ethnicity_extract": False, 
-            "num_subjects": 100,
+            "num_subjects": 200,
             "mimic_info": {
                 "mimic_num": mimic_num,
                 "mimic_path": mimic_path,
