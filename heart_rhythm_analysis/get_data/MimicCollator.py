@@ -35,6 +35,7 @@ class MimicIVCollator():
             self.custom_records['label'] = None
 
         self.ethnicity_data = None
+        self.min_minutes = 30
 
         if self.mimic_num == "4":
             self.mimic_matched_path = 'https://physionet.org/files/mimic-iv-ecg/1.0/'
@@ -53,8 +54,103 @@ class MimicIVCollator():
             self.out_path = os.path.join(self.root_dir,out_filename)
         else:
             out_filename = f"{self.outfile_version}_mimic{self.mimic_num}{self.custom_records['name'] if self.custom_records['name'] is not None else ""}_struct.mat"
+            out_filename = out_filename[1:] if out_filename[0] == '_' else out_filename
             self.out_path = os.path.join(self.root_dir,out_filename )
 
+    def extract_matching_record_info(self,matching_records, mimic_path, mimic_num):
+        infos = []
+        iterable = (matching_records.items()
+                    if hasattr(matching_records, "items")
+                    else enumerate(matching_records))
+
+        for idx, curr_record in iterable:
+            # 1) find the folder name
+            url = f"https://physionet.org/files/{mimic_path}{curr_record}RECORDS"
+            try:
+                rec_id = (
+                    pd.read_csv(url, header=None).iloc[0,0]
+                    .rstrip("/").split("/")[-1]
+                )
+            except:
+                continue
+
+            # base directory for WFDB calls
+            subject_and_rec_dir = os.path.join(mimic_path, curr_record)
+            if mimic_num == "3":
+                base_pn_dir = subject_and_rec_dir
+                initial_header =  rec_id[:-2] if rec_id[-1] == "n" else rec_id
+            elif mimic_num == "4":
+                base_pn_dir = os.path.join(subject_and_rec_dir, rec_id)
+                initial_header = rec_id
+            try:
+                signal_length_header = wfdb.rdheader(initial_header, pn_dir=base_pn_dir)
+            except Exception as e:
+                continue
+
+            if (hasattr(signal_length_header, 'seg_name')):
+                if ('~' in signal_length_header.seg_name):
+                    indices_to_remove = [i for i, name in enumerate(signal_length_header.seg_name) if name == '~']
+                    signal_length_header.seg_name = [name for i, name in enumerate(signal_length_header.seg_name) if i not in indices_to_remove]
+                    signal_length_header.seg_len = np.delete(signal_length_header.seg_len, indices_to_remove)
+
+            # ── A) Top‐level header to get segments & lengths ────────────
+            if mimic_num == "3":
+                if signal_length_header.record_name[-1] == "n":
+                    continue
+                signal_name_file = signal_length_header.seg_name[0]
+                possible_signals_hdr = wfdb.rdheader(signal_name_file, pn_dir=base_pn_dir)
+            elif mimic_num == "4":
+                possible_signals_hdr = wfdb.rdheader(rec_id, pn_dir=base_pn_dir)
+            
+            try:
+                possible_signals = [s.lower() for s in possible_signals_hdr.sig_name]
+            except:
+                possible_signals = []
+
+            seg_names = signal_length_header.seg_name or []
+            fs = signal_length_header.fs
+            # ── B) now loop each real segment and get its actual signals ────
+            seg_lengths = np.atleast_1d(signal_length_header.seg_len)
+            seg_info = list(zip(seg_names, seg_lengths))
+            # Sort so the longest segment is tried first
+            seg_info.sort(key=lambda pair: pair[1], reverse=True)
+        
+            arterial_signals = [label.lower() for label in self.Arterial_blood_pressure_labels if label  in possible_signals]
+
+            MIN_LEN = int(self.min_minutes * fs * 60)
+            if (len(seg_info) < 2) or (seg_info[1][1] < MIN_LEN):
+                continue
+
+            if (possible_signals is None) or (not all(label.lower() in possible_signals for label in self.ecg_ppg_labels)) or (not arterial_signals):
+                continue─
+            for seg_name, seg_len in seg_info:
+                try:
+                    seg_hdr = wfdb.rdheader(seg_name, pn_dir=base_pn_dir)
+                    actual_signals = [s.lower() for s in seg_hdr.sig_name]
+                except:
+                    actual_signals = []
+
+                max_duration = seg_len
+                max_freq = seg_hdr.fs
+                
+                arterial_signals = [label.lower() for label in self.Arterial_blood_pressure_labels if label  in actual_signals]
+                if (max_duration < MIN_LEN) or (max_freq < 20):
+                    break
+
+                if (actual_signals is None) or (not all(label.lower() in actual_signals for label in self.ecg_ppg_labels)) or (not arterial_signals):
+                    continue
+
+                infos.append({
+                    "idx":              idx,
+                    "pn_dir":           subject_and_rec_dir,
+                    "rec_id":           str(rec_id),
+                    "file_id":          seg_name,
+                    "seg_len":           seg_hdr.sig_len,
+                    "seg_dur_s":        max_duration,
+                    "actual_signals":   actual_signals
+                })
+                break
+        return pd.DataFrame(infos)
 
     def collate_dataset(self, load_metadata=True, load_waveforms=True, download_waveforms=False):
         print(f"\n ~~~ Downloading and collating MIMIC {self.mimic_num} matched waveform subset ~~~")
@@ -70,9 +166,22 @@ class MimicIVCollator():
         if download_waveforms:
             self.download_dataset()
 
-        match_records = self.prepare_record_list()
+        if self.mimic_num == "3":
+            match_records = self.prepare_mimic3_record_list()
+        elif self.mimic_num == "4":
+            match_records = self.prepare_mimic4_record_list()
+
+        csv_file = "mimic{self.mimic_path}_best_record_records.csv"
+        csv_path = os.path.join(self.root_dir,csv_file)
+        if not os.path.exists(csv_path):
+            info_df = self.extract_matching_record_info(matching_records=match_records['matching_records'],mimic_path=self.mimic_path,mimic_num=self.mimic_num)
+            info_df.to_csv(csv_path, index=False)
+            print(f"Wrote record info to {csv_path}")
+        else:
+            info_df = pd.read_csv(csv_path)
+
         if load_waveforms:
-            self.scan_waveform_directory(match_records)
+            self.scan_waveform_directory(match_records,record_info = info_df)
 
     def setup_paths(self):
         print("\n - Setting up parameters")
@@ -147,89 +256,195 @@ class MimicIVCollator():
                     f.write(chunk)
         print("Download complete.")
 
-    def prepare_record_list(self):
+    def prepare_mimic3_record_list(self):
         df_categories = {}
-        if self.mimic_num == "3":
-            records_db = []
-            machine_measurments_db = []
-        elif self.mimic_num == "4":
-            records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
-            dtype_cols = { 
-                16: str, 17: str, 18: str, 19: str, 20: str, 21: str 
-            }
-            machine_measurments_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'),dtype=dtype_cols)
-        
-        bMatchOverwrite = True
-        waveform_dataset_RECORDS = pd.read_csv(f"https://physionet.org/files/{self.mimic_path}/RECORDS",header=None)
-        subjects_series = (
-            waveform_dataset_RECORDS[0]
-            .str.rsplit("/", n=2)  
-            .str[1]                 
-            .str.lstrip("p")        
+        # read the RECORDS file and extract subject series
+        recs = pd.read_csv(
+            f"https://physionet.org/files/{self.mimic_path}/RECORDS",
+            header=None, names=["path"]
         )
-        df_categories['matching_records'] = waveform_dataset_RECORDS[0]
-        if self.mimic_num == "3":
-            if self.custom_records['filenames'] is not None:
-                custom_filnames_df = pd.Series(self.custom_records['filenames']).str.split('-', expand=True)
-                custom_filnames_df.columns = ['subject_id', 'year', 'month', 'day', 'hour', 'minute']
-                subjects_of_interest = custom_filnames_df['subject_id'].str.lstrip("p")
-                lookup = {val: idx for idx, val in enumerate(subjects_series)}
-                positions = [lookup[x] for x in subjects_of_interest if x in lookup]
-                df_categories['matching_records'] = df_categories['matching_records'][positions]
-        elif (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
-            df_categories['report_columns'] = [f'report_{i}' for i in range(0,18)]
-            flat = machine_measurments_db[df_categories['report_columns']].values.ravel().astype(str)
-            all_text= np.unique(np.char.lower(flat))
-            filtered_record_list = records_db.merge(machine_measurments_db[['subject_id', 'study_id']],
-                                                    on=['subject_id', 'study_id'],
-                                                    how='inner')
+        df_categories['matching_records'] = recs["path"]
+        subjects_series = recs["path"].str.split("/", expand=True)[1].str.lstrip("p")
+
+        # ── optimize mimic 3 case ───────────────────────────────
+        fnames = self.custom_records.get("filenames")
+        if fnames:
+            # extract subject IDs in one vectorized go
+            custom_df = pd.DataFrame(fnames, columns=["filename"])
+            custom_df["subject_id"] = (
+                custom_df["filename"]
+                .str.extract(r"p(\d+)-", expand=False)
+            )
+            # boolean mask over subjects_series
+            mask = subjects_series.isin(custom_df["subject_id"])
+            df_categories['matching_records'] = df_categories['matching_records'][mask.values]
+        return df_categories
+
+    def prepare_mimic4_record_list(self):
+        df_categories = {}
+        records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
+        # ensure report_columns exist on machine_measurements_db
+        dtype_cols = {i: str for i in range(16,22)}
+        machine_measurements_db = pd.read_csv(os.path.join(self.out_dir,'machine_measurements.csv'),dtype=dtype_cols)
+
+        # read the RECORDS file and extract subject series
+        bMatchOverwrite = True
+        recs = pd.read_csv(
+            f"https://physionet.org/files/{self.mimic_path}/RECORDS",
+            header=None, names=["path"]
+        )
+        df_categories['matching_records'] = recs["path"]
+        subjects_series = recs["path"].str.split("/", expand=True)[1].str.lstrip("p")
+        # precompute these once
+        report_cols = [f"report_{i}" for i in range(18)]
+        df_categories['report_columns'] = report_cols
+
+        if self.categories_of_interest:
             for substring in self.categories_of_interest:
-                string_exists = any(substring in s for s in all_text)
-                if string_exists:
-                    row_matches = [s for s in all_text if substring in s]
+                contains_mask = (machine_measurements_db[report_cols].apply(lambda col: col.str.contains(substring, case=False, na=False)).any(axis=1))
 
-                substring_path = os.path.join(self.out_dir,f"{substring.replace(" ","_")}_match_idxs.csv")
-                if not os.path.exists(substring_path) or (bMatchOverwrite is True):
-                    matches = pd.Series(find_matching_rows(machine_measurments_db, df_categories['report_columns'], row_matches))
-                    matches.columns = ['substring']
-                    matches.to_csv(substring_path,index=False)
-                matches = pd.read_csv(substring_path,index_col=None)
+                idxs = contains_mask[ contains_mask ].index.to_series()
+                path = os.path.join(self.out_dir, f"{substring.replace(' ','_')}_match_idxs.csv")
+                if not os.path.exists(path) or bMatchOverwrite:
+                    idxs.to_csv(path, index=False, header=False)
 
-                curr_substring_df = filtered_record_list.loc[matches['0']]
-                df_categories['curr_substring_measurement_df'] = machine_measurments_db.iloc[matches['0']]
-                unique_subjects = (curr_substring_df['subject_id'].astype(str).unique())
-                mask = subjects_series.isin(unique_subjects)
-                df_categories['matching_records'] = waveform_dataset_RECORDS.loc[mask, 0]
+                matches = pd.read_csv(path, header=None)[0]
+
+                df_categories['curr_measurement_df'] = machine_measurements_db.loc[matches]
+
+                subject_ids = df_categories['curr_measurement_df']["subject_id"].astype(str).unique()
+                mask = subjects_series.isin(subject_ids)
+                df_categories['matching_records'] = recs["path"][mask.values]
+        else:
+            df_categories['curr_measurement_df'] = machine_measurements_db
 
         return df_categories
+   
+    # def prepare_record_list(self):
+    #     df_categories = {}
+    #     # load your tables once
+    #     if self.mimic_num == "3":
+    #         records_db = []
+    #         machine_measurements_db = []
+    #     elif self.mimic_num == "4":
+    #         records_db = pd.read_csv(os.path.join(self.out_dir,'record_list.csv'))
+    #         # ensure report_columns exist on machine_measurements_db
+    #         dtype_cols = {i: str for i in range(16,22)}
+    #         machine_measurements_db = pd.read_csv(
+    #             os.path.join(self.out_dir,'machine_measurements.csv'),
+    #             dtype=dtype_cols
+    #         )
+
+    #     # read the RECORDS file and extract subject series
+    #     bMatchOverwrite = True
+    #     recs = pd.read_csv(
+    #         f"https://physionet.org/files/{self.mimic_path}/RECORDS",
+    #         header=None, names=["path"]
+    #     )
+    #     df_categories['matching_records'] = recs["path"]
+    #     subjects_series = recs["path"].str.split("/", expand=True)[1].str.lstrip("p")
+
+    #     if self.mimic_num == "3":
+    #         # ── optimize mimic 3 case ───────────────────────────────
+    #         fnames = self.custom_records.get("filenames")
+    #         if fnames:
+    #             # extract subject IDs in one vectorized go
+    #             custom_df = pd.DataFrame(fnames, columns=["filename"])
+    #             custom_df["subject_id"] = (
+    #                 custom_df["filename"]
+    #                 .str.extract(r"p(\d+)-", expand=False)
+    #             )
+    #             # boolean mask over subjects_series
+    #             mask = subjects_series.isin(custom_df["subject_id"])
+    #             df_categories['matching_records'] = df_categories['matching_records'][mask.values]
+
+    #     elif self.mimic_num == "4":
+    #         # precompute these once
+    #         report_cols = [f"report_{i}" for i in range(18)]
+    #         df_categories['report_columns'] = report_cols
+
+    #         if self.categories_of_interest:
+    #             # do the merge once outside the loop
+    #             filtered_records = records_db.merge(
+    #                 machine_measurements_db[["subject_id", "study_id"]],
+    #                 on=["subject_id", "study_id"],
+    #                 how="inner"
+    #             )
+
+    #             for substring in self.categories_of_interest:
+    #                 # vectorized boolean mask for any cell in any report column containing substring
+    #                 # na=False so empty cells won’t match
+    #                 contains_mask = (
+    #                     machine_measurements_db[report_cols]
+    #                     .apply(lambda col: col.str.contains(substring, case=False, na=False))
+    #                     .any(axis=1)
+    #                 )
+
+    #                 # cache to disk if needed
+    #                 idxs = contains_mask[ contains_mask ].index.to_series()
+    #                 path = os.path.join(self.out_dir, f"{substring.replace(' ','_')}_match_idxs.csv")
+    #                 if not os.path.exists(path) or bMatchOverwrite:
+    #                     idxs.to_csv(path, index=False, header=False)
+
+    #                 matches = pd.read_csv(path, header=None)[0]
+
+    #                 # pick out the matching measurement rows
+    #                 df_categories['curr_measurement_df'] = machine_measurements_db.loc[matches]
+
+    #                 # now filter RECORDS by subjects in these matches
+    #                 subject_ids = df_categories['curr_measurement_df']["subject_id"].astype(str).unique()
+    #                 mask = subjects_series.isin(subject_ids)
+    #                 df_categories['matching_records'] = recs["path"][mask.values]
+    #         else:
+    #             # no filtering needed: keep entire measurements table
+    #             df_categories['curr_measurement_df'] = machine_measurements_db
+
+    #     return df_categories
     
-    def scan_waveform_directory(self,df_categories):
+    def scan_waveform_directory(self,df_categories,record_info=None):
         print("Scanning for waveform files...")
         curr_subject_count = 0
         subject_data = []
 
+
         matching_records = df_categories['matching_records']
-        total_subjects_available = len(matching_records)
+        if record_info is not None:
+            matching_records = matching_records.iloc[record_info['idx']]
+            
+        if hasattr(matching_records, "items"):
+            iterator = matching_records.items()
+        else:
+            # fall back to a simple list
+            iterator = enumerate(matching_records)
+
         if self.num_subjects > len(matching_records):
                 self.num_subjects = len(matching_records)
-        for curr_record in matching_records:
+        total_subjects_available = self.num_subjects
+        for idx,curr_record in iterator:
             if self.bVerbose: print('\n')
             subj_id_ecg_dataset = int(curr_record.rpartition('/')[0].rpartition('/')[-1][1:])
 
             if curr_subject_count >= self.num_subjects:
                 break
 
-            data_path = os.path.join("https://physionet.org/files/",self.mimic_path,curr_record)
-            temp_folder = pd.read_csv(f'{data_path}RECORDS',header=None)[0][0].rpartition('/')[-1]
-            hea_file = f"{temp_folder}.hea"
             curr_pn_dir = os.path.join(self.mimic_path,curr_record)
-            if self.mimic_num == "4":
-                curr_pn_dir = os.path.join(curr_pn_dir,temp_folder)
+            if record_info is not None:
+                mask     = record_info['idx'] == idx
+                rec_id = str(record_info.loc[mask, 'record_name'].tolist()[0])
+                file_id = str(record_info.loc[mask, 'segment'].tolist()[0])
+                hea_file = f'{file_id}.hea'
+                curr_pn_dir = os.path.join(curr_pn_dir,rec_id)
+            else:
+                data_path = os.path.join("https://physionet.org/files/",self.mimic_path,curr_record)
+                temp_folder = pd.read_csv(f'{data_path}RECORDS',header=None)[0][0].rpartition('/')[-1]
+                hea_file = f"{temp_folder}.hea"
+                if self.mimic_num == "4":
+                    curr_pn_dir = os.path.join(curr_pn_dir,temp_folder)
             try:
                 folder_header = wfdb.rdheader(record_name=hea_file[:-4], pn_dir=curr_pn_dir)
             except Exception as e:
                 print(f"Failed to load header {curr_pn_dir}/{hea_file[:-4]}: {e}")   
-            
+            top_k_indices = [0]
             if (hasattr(folder_header, 'seg_name')):
                 if ('~' in folder_header.seg_name):
                     indices_to_remove = [i for i, name in enumerate(folder_header.seg_name) if name == '~']
@@ -239,10 +454,6 @@ class MimicIVCollator():
                     k = len(folder_header.seg_len)
                     seg_len = np.array(folder_header.seg_len)
                     top_k_indices = np.argsort(-seg_len)[:k]
-                else:
-                    top_k_indices = [0]
-            else:
-                pass
 
             count = 0
             bSkipSubject = False
@@ -261,6 +472,8 @@ class MimicIVCollator():
                 max_duration = file_header.sig_len
                 max_freq = file_header.fs
                 MIN_LEN = int(max_freq * 30 * 60)
+                
+                record_info
 
                 if (max_duration < MIN_LEN) or (max_freq < 20):
                     if self.bVerbose: print(f'Total Subjects Available: {total_subjects_available} | Discarded: {curr_pn_dir}{curr_record_name} [ Duration: {max_duration/max_freq/60:.2f} | Signals: {sig_names}]')
@@ -281,19 +494,27 @@ class MimicIVCollator():
 
             try:
                 subj_id = curr_record.split('/')[-2]
-                rec_id = file_header.record_name
+                rec_id = file_header.record_name.split('_')[0]
                 file_id = hea_file[:-4]
                 record = wfdb.rdrecord(rec_id, pn_dir=curr_pn_dir,sampto=MIN_LEN)
                 sig_names = [item.lower() for item in record.sig_name]
                 
                 unique_notes = ""
-                if (self.mimic_num == "4") and (len(self.categories_of_interest) > 0):
-                    curr_substring_measurement_df = df_categories['curr_substring_measurement_df']
-                    filtered_df = curr_substring_measurement_df[curr_substring_measurement_df['subject_id'] == subj_id_ecg_dataset]
-                    concatenated_strings = filtered_df[df_categories['report_columns']].fillna('').apply(
-                        lambda row: ' '.join(str(cell) for cell in row),
-                        axis=1)
-                    unique_notes = concatenated_strings.unique().tolist()
+                if (self.mimic_num == "4"):
+                    if (len(self.categories_of_interest) > 0):
+                        curr_measurement_df = df_categories['curr_measurement_df']
+                        filtered_df = curr_measurement_df[curr_measurement_df['subject_id'] == subj_id_ecg_dataset]
+                        concatenated_strings = filtered_df[df_categories['report_columns']].fillna('').apply(
+                            lambda row: ' '.join(str(cell) for cell in row),
+                            axis=1)
+                        unique_notes = concatenated_strings.unique().tolist()
+                    else:
+                        subj_df = df_categories["curr_measurement_df"].loc[
+                        df_categories["curr_measurement_df"]["subject_id"] == int(subj_id[1:]),
+                        df_categories['report_columns']
+                        ]
+                        reports = subj_df.stack().astype(str).str.lower().values
+                        unique_notes = np.unique(reports)
             
                 subj_data = {
                     'fix': {
@@ -332,7 +553,7 @@ class MimicIVCollator():
 
 if __name__ == "__main__":
     # mimic_num = "3"
-    for mimic_num in ["3","4"]:
+    for mimic_num in ["3"]:
         MIMIC_3_CUSTOM_DATASET = {}
         MIMIC_3_CUSTOM_DATASET['all_label'] = [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1]
         MIMIC_3_CUSTOM_DATASET['all_filename'] = ['p000608-2167-03-09-11-54','p000776-2184-04-30-15-16', 'p000946-2120-05-14-08-08', 'p004490-2151-01-07-12-36', 'p004829-2103-08-30-21-52', 'p075796-2198-07-25-23-40', 'p009526-2113-11-17-02-12', 'p010391-2183-12-25-10-15', 'p013072-2194-01-22-16-13', 'p013136-2133-11-09-16-58', 'p014079-2182-09-24-13-41', 'p015852-2148-05-03-18-39', 'p016684-2188-01-29-00-06', 'p017344-2169-07-17-17-32', 'p019608-2125-02-05-04-57', 'p022954-2136-02-29-17-52', 'p023824-2182-11-27-14-22', 'p025117-2202-03-15-20-28', 'p026377-2111-11-17-16-46', 'p026964-2147-01-11-18-03', 'p029512-2188-02-27-18-10', 'p043613-2185-01-18-23-52', 'p050089-2157-08-23-16-37', 'p050384-2195-01-30-02-21', 'p055204-2132-06-30-09-34', 'p058932-2120-10-13-23-15', 'p062160-2153-10-03-14-49', 'p063039-2157-03-29-13-35', 'p063628-2176-07-02-20-38', 'p068956-2107-04-21-16-05', 'p069339-2133-12-09-21-14', 'p075371-2119-08-22-00-53', 'p077729-2120-08-31-01-03', 'p087275-2108-08-29-12-53', 'p079998-2101-10-21-21-31', 'p081349-2120-02-11-06-35', 'p085866-2178-03-20-17-11', 'p087675-2104-12-05-03-53', 'p089565-2174-05-12-00-07', 'p089964-2154-05-21-14-53', 'p092289-2183-03-17-23-12', 'p092846-2129-12-21-13-12', 'p094847-2112-02-12-19-56', 'p097547-2125-10-21-23-43', 'p099674-2105-06-13-00-07']
@@ -363,7 +584,7 @@ if __name__ == "__main__":
                 custom_records['label'] = 1
                 
         elif mimic_num == "4":
-            mimic_path = 'mimic4wdb/0.1.0/'#'https://physionet.org/files/mimic-iv-ecg/1.0/'
+            mimic_path = 'mimic4wdb/0.1.0/'
 
         config = {
             "paths": {
@@ -372,7 +593,7 @@ if __name__ == "__main__":
                     "outfile_version": ""
                 }
             },
-            "ethnicity_extract": False,  # Set True to download and include metadata
+            "ethnicity_extract": False, 
             "num_subjects": 100,
             "mimic_info": {
                 "mimic_num": mimic_num,
@@ -380,7 +601,6 @@ if __name__ == "__main__":
             },
             "substring_to_match": [],
             "custom_records": custom_records
-            
         }
 
         collator = MimicIVCollator(config,verbose=True)

@@ -41,7 +41,8 @@ def make_window_figure(window, specs):
     fig = make_subplots(
         rows=len(plot_ids), cols=1,
         subplot_titles=subplot_titles,
-        vertical_spacing=0.08
+        vertical_spacing=0.08,
+        shared_xaxes= True
     )
 
     # 4) add each trace into its assigned row
@@ -111,30 +112,3 @@ def create_time_series_viewer(
         return figure_fn(window)
 
     return app
-
-
-    # def update(selected_idx, overlay_keys):
-    #     window = df.loc[selected_idx]
-
-    #     # If user has checked one or more keys, build a single overlaid plot
-    #     if overlay_keys:
-    #         fig = go.Figure()
-    #         for key in overlay_keys:
-    #             # find the matching fs_key in specs
-    #             fs_key = next(s["fs_key"] for s in specs if s["key"] == key)
-    #             y  = window[key]
-    #             t  = np.arange(len(y)) / window[fs_key]
-    #             fig.add_trace(go.Scatter(x=t, y=y, mode="lines", name=key))
-    #         fig.update_layout(
-    #             title=f"Subject {window.subject} – Window {window.window_id} (overlay)",
-    #             xaxis_title="Time (s)",
-    #             yaxis_title="Amplitude",
-    #             height=600,
-    #             showlegend=True
-    #         )
-    #         return fig
-
-    #     # else: fall back to your standard multi-subplot view
-    #     return figure_fn(window)
-
-    # return app
