@@ -256,10 +256,18 @@ class PPGWindow(Dataset):
     def __getitem__(self, idx):
         subj, wid = self.index[idx]
         grp = self.h5[subj][wid]
+
+        # print(self.h5.keys())
+        # print(self.index[idx])
+        # print(self.h5[subj].keys())
+        # print(grp.keys())
+        # print(grp.items())
+        # print(grp.attrs['raw_ppg_fs'])
         # raw arrays from file
         proc = grp['proc_ppg'][:]    # float32, length maybe ≠ win_len
         y    = grp['y'][:]           # float32, same
         raw  = grp['raw_ppg'][:]     # float64, maybe full trace
+        
 
         # enforce uniform length
         proc = self._pad_or_trim(proc).astype('float16')
@@ -270,12 +278,14 @@ class PPGWindow(Dataset):
         proc_t = torch.from_numpy(proc).float().unsqueeze(0)  # (1, win_len)
         y_t    = torch.from_numpy(y).float()                 # (win_len,)
         raw_t  = torch.from_numpy(raw).float().unsqueeze(0)  # (1, win_len)
+        # raw_fs  = torch.tensor(raw_fs, dtype=torch.float16)
 
         if self.transform:
             proc_t = self.transform(proc_t)
 
         label = grp.attrs.get('label')
-        return proc_t, y_t, raw_t, label
+        raw_fs = grp.attrs.get('raw_ppg_fs')
+        return proc_t, y_t, raw_t, label,raw_fs
 
     def __getstate__(self):
         st = self.__dict__.copy()

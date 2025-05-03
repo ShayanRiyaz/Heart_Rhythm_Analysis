@@ -66,7 +66,7 @@ def make_window_figure(window, specs):
 
     fig.update_layout(
         height=300 * len(plot_ids),
-        title_text=f"Subject {window['subject']} – Window {window['window_id']}",
+        title_text=f"Subject {window['subject']} – Window {window['window_count']}",
         showlegend=True
     )
 

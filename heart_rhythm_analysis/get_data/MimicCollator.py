@@ -61,7 +61,7 @@ class MimicCollator():
             out_filename =  f"{self.outfile_version}_mimic{self.mimic_num}_{self.categories_of_interest.replace(" ","_") if len(self.categories_of_interest) != 0  else ''}_struct.mat"
             self.out_path = os.path.join(self.root_dir,out_filename)
         else:
-            out_filename = f"{self.outfile_version}_mimic{self.mimic_num}{self.custom_records['name'] if self.custom_records['name'] is not None else ""}_struct.mat"
+            out_filename = f"{self.outfile_version}_mimic{self.mimic_num}{self.custom_records['name'] if self.custom_records['name'] is not None else ""}_structt.mat"
             out_filename = out_filename[1:] if out_filename[0] == '_' else out_filename
             self.out_path = os.path.join(self.root_dir,out_filename )
 
@@ -602,7 +602,7 @@ if __name__ == "__main__":
                 }
             },
             "ethnicity_extract": False, 
-            "num_subjects": 100,
+            "num_subjects": 10000,
             "mimic_info": {
                 "mimic_num": mimic_num,
                 "mimic_path": mimic_path,
@@ -611,6 +611,6 @@ if __name__ == "__main__":
             "custom_records": custom_records
         }
 
-        collator = MimicIVCollator(config,verbose=True)
+        collator = MimicCollator(config,verbose=True)
         end_time = collator.collate_dataset(load_metadata=False, load_waveforms=True, download_waveforms=False)
         print(f"Execution Time: {end_time}")

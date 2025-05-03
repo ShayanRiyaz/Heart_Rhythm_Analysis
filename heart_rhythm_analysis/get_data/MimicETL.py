@@ -39,7 +39,7 @@ class MimicETL:
             subj_id = str(rec.fix.subj_id)
             af_status = int(rec.fix.af_status)
             try:
-                notes = rec.fix.notes
+                notes = rec.fix.subject_notes
             except Exception as E:
                 notes = ""
             

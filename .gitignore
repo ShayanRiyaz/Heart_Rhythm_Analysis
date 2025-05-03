@@ -15,3 +15,4 @@ checkpoints
 
 build
 heart_rhythm_analysis.egg-info
+notebooks/runs/*
