@@ -1,18 +1,15 @@
-__pycache__/
-__pycache__/*.*
-downloaded_files
-downloaded_files/*/*.*
-downloaded_files/*.*
-*.mat
-*.m
-
-*.DS_Store
-*.pth
-trained_models
+# Folders, subfolders
+__pycache__
 archive
 data
-checkpoints
-
+notebooks/runs
+trained_models
 build
 heart_rhythm_analysis.egg-info
-notebooks/runs/*
+
+# Files
+*.mat
+*.m
+*.DS_Store
+*.pkg
+*.pth
