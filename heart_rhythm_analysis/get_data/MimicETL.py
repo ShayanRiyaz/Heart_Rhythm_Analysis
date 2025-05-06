@@ -2,142 +2,240 @@ import os
 import scipy.io as sio
 import numpy as np
 import h5py
+from pathlib import Path
+import logging
+from typing import Any, Dict
+logger = logging.getLogger(__name__)
+
 
 import uuid
 from heart_rhythm_analysis.utils.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal,pseudo_peak_vector
 
+
+
 class MimicETL:
     def __init__(self, config):
-        self.input_dir = config["input_dir"]
-        self.output_dir = config["output_dir"]
-        self.window_size_sec = config.get("window_size_sec", 30)
-        self.fs_in = config.get("fs_in", 125.0)
-        self.fs_out = config.get("fs_out",self.fs_in)
-        self.lowpass_cutoff = config.get("lowpass_cutoff", 8.0)
-        self.fir_numtaps = config.get("fir_numtaps", 33)
-        self.zero_phase = config.get("zero_phase", True)
-        self.out_filename = config.get("out_filename", True)
-        self.windows_data = []  # list of dicts
-        self.scale_type = config.get("scale_type", None)
-        self.bdecimate_signal =  config.get("decimate_signal", False)
-        self.fs_ekg = config.get("fs_ekg",125)
-        self.fs_bp = config.get("fs_bp",62.5)
+        # 1) Resolve and validate the input file
+        self.input_dir = Path(config["input_dir"]).resolve()
+        if not self.input_dir.is_file():
+            raise FileNotFoundError(f"MAT file not found: {self.input_dir}")
 
-        if self.fs_in == self.fs_out:
-            self.bdecimate_signal = False
-            raise f"fs_in [{self.fs_in}] == fs_out [{self.fs_out}], setting decimate_signal to False"
+        # 2) Derive “raw” folder automatically
+        allowed_root = None
+        for parent in self.input_dir.parents:
+            if parent.name == "raw":
+                allowed_root = parent
+                break
+        if allowed_root is None:
+            raise ValueError(
+                f"Could not find a parent folder named 'raw' for {self.input_dir}"
+            )
+        logger.info(f"Derived allowed raw‐data root at {allowed_root}")
+
+        self.out_filename = str(config.get("out_filename", "etl_output"))
+        # 3) Set output_dir next to it (e.g. .../data/raw → .../data/processed)
+        self.output_dir = allowed_root.parent / f"processed/length_full/{self.out_filename}"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.output_dir, 0o750)
+        print(self.output_dir)
+        # --- Pipeline parameters ---
+        self.window_size_sec = int(config.get("window_size_sec", 30))
+        self.fs_in = float(config.get("fs_in", 125.0))
+        self.fs_out = float(config.get("fs_out", self.fs_in))
+        self.bdecimate_signal = bool(config.get("decimate_signal", self.fs_in != self.fs_out))
+
+        if self.fs_in == self.fs_out and config.get("decimate_signal", False):
+            logger.warning(f"fs_in ({self.fs_in}) == fs_out ({self.fs_out}); disabling decimation.")
+
+        self.lowpass_cutoff = float(config.get("lowpass_cutoff", 8.0))
+        self.fir_numtaps = int(config.get("fir_numtaps", 33))
+        self.zero_phase = bool(config.get("zero_phase", True))
+        self.scale_type = config.get("scale_type")
+        self.fs_ekg = float(config.get("fs_ekg", 125.0))
+        self.fs_bp = float(config.get("fs_bp", 62.5))
+        
+
+        # Placeholder for HDF5 handle
+        self.h5f: h5py.File
+
+        logger.info(
+            f"Initialized ETL: input={self.input_dir}, output={self.output_dir}, "
+            f"fs_in={self.fs_in}, fs_out={self.fs_out}, decimate={self.bdecimate_signal}"
+        )
         
     def extract(self):
-        print(f"Loading {self.input_dir}")
-        mat = sio.loadmat(self.input_dir, squeeze_me=True, struct_as_record=False)
+        logger.info(f"Loading MAT file from {self.input_dir}")
+        try:
+            mat = sio.loadmat(self.input_dir, squeeze_me=True, struct_as_record=False)
+        except Exception as e:
+            logger.exception("Failed to load MAT file")
+            raise
         return mat["data"]
 
-    def transform(self, recs):
-        windows = []
-        for rec in np.atleast_1d(recs):
-            rec_id = str(rec.fix.rec_id)
-            subj_id = str(rec.fix.subj_id)
-            af_status = int(rec.fix.af_status)
-            try:
-                notes = rec.fix.subject_notes
-            except Exception as E:
-                notes = ""
+
+    def _process_one_record(self, rec: Any) -> None:
+        """
+        Transform and write all windows from a single record object.
+        Catches and logs per-record errors to avoid full pipeline failure.
+        """
+        rec_id = getattr(rec.fix, 'rec_id', 'unknown')
+        subj_id = getattr(rec.fix, 'subj_id', 'unknown')
+        try:
+            ppg = rec.ppg.v
+            fs_ppg = float(rec.ppg.fs)
+            ekg = rec.ekg.v
+            fs_ekg = self.fs_ekg
+            abp = rec.bp.v
+            fs_abp = self.fs_bp
             
-            sig_obj = getattr(rec, "ppg", None)
-            if not hasattr(sig_obj, "v"):
-                continue
-
-            fs = float(sig_obj.fs)
-            win_samples = int(self.window_size_sec * fs)
-            ppg_data = sig_obj.v
-
-            ekg_obj = getattr(rec, "ekg", None)
-            if not hasattr(ekg_obj, "v"):
-                continue
-            ekg_data  = ekg_obj.v
-            ekg_fs =self.fs_ekg #float(ekg_obj.fs)
-            ekg_win_samples = int(self.window_size_sec * ekg_fs)
-
-            abp_obj = getattr(rec, "bp", None)
-            if not hasattr(abp_obj, "v"):
-                continue
-            abp_data  = abp_obj.v
-            abp_fs =self.fs_bp;#float(abp_obj.fs)
-            abp_win_samples = int(self.window_size_sec * abp_fs)
-
+            win_samples = int(self.window_size_sec * fs_ppg)
+            ekg_samples = int(self.window_size_sec * fs_ekg)
+            abp_samples = int(self.window_size_sec * fs_abp)
             n_windows = min(
-            len(ppg_data) // win_samples,
-            len(ekg_data) // ekg_win_samples,
-            len(abp_data) // abp_win_samples
+                len(ppg) // win_samples,
+                len(ekg) // ekg_samples,
+                len(abp) // abp_samples
             )
+
             for i in range(n_windows):
-                start, end = i*win_samples, (i+1)*win_samples
-                start_ekg,end_ekg = i*ekg_win_samples, (i+1)*ekg_win_samples
-                start_abp,end_abp = i*abp_win_samples, (i+1)*abp_win_samples
+                start_ppg, end_ppg = i*win_samples, (i+1)*win_samples
+                start_ekg, end_ekg = i*ekg_samples, (i+1)*ekg_samples
+                start_abp, end_abp = i*abp_samples, (i+1)*abp_samples
 
-                if end > len(ppg_data) or end_ekg > len(ekg_data) or end_abp > len(abp_data):
-                    continue  # skip incomplete final window
-                raw_win = ppg_data[start:end]
-                raw_ekg = ekg_data[start_ekg:end_ekg]
-                raw_abp = abp_data[start_abp:end_abp]
+                raw_ppg = ppg[start_ppg:end_ppg]
+                raw_ekg = ekg[start_ekg:end_ekg]
+                raw_abp = abp[start_abp:end_abp]
 
-                x = clean_signal(raw_win)
-                if x is None: continue
-                if (self.bdecimate_signal is True):
-                    x = decimate_signal(x,
-                                        fs_in=fs, fs_out=self.fs_out,
-                                        cutoff=self.lowpass_cutoff,
-                                        numtaps=self.fir_numtaps,
-                                        zero_phase=self.zero_phase)
-                else: 
-                    self.fs_out = fs
+                # if end_ppg > len(raw_ppg) or end_ekg > len(raw_ekg) or end_abp > len(raw_abp):
+                #     continue  # skip incomplete final window
 
+                proc = clean_signal(raw_ppg)
+                if proc is None:
+                    continue
+
+                if self.bdecimate_signal:
+                    proc = decimate_signal(
+                        proc, fs_in=fs_ppg, fs_out=self.fs_out,
+                        cutoff=self.lowpass_cutoff, numtaps=self.fir_numtaps,
+                        zero_phase=self.zero_phase
+                    )
+                else:
+                    self.fs_out = fs_ppg
                 if self.scale_type is not None:
                     scaling_config = None
-                    if len(x) >= 150:
-                        scaling_config = find_sliding_window(len(x), target_windows = 5, overlap=25)
-                    x = scale_signal(x, config = scaling_config, method = self.scale_type)
-                y = pseudo_peak_vector(x,fs = self.fs_out )    # convert back to numpy
-                win_id = str(uuid.uuid4())
-                self.windows_data.append({
-                    'subject': f'{subj_id}',
-                    'rec_id': f'{rec_id}',
-                    'window_id': win_id,
-                    'ppg_fs': self.fs_out,
-                    'raw_ppg': raw_win,
-                    'proc_ppg': x,
-                    'y':y,
-                    'raw_ekg': raw_ekg,
-                    'raw_abp':raw_abp,
-                    'raw_ppg_fs': self.fs_in,
-                    'ekg_fs': ekg_fs,
-                    'abp_fs':abp_fs,
-                    'label': af_status,
-                    'notes': notes
-                })
+                    if len(proc) >= 150:
+                        scaling_config = find_sliding_window(len(proc), target_windows = 5, overlap=25)
+                    proc = scale_signal(proc, config = scaling_config, method = self.scale_type)
+                
+                peaks = np.asarray(pseudo_peak_vector(proc, fs=self.fs_out))
+                mask = peaks > 0 
+                ref_indices = np.flatnonzero(mask)
+                # ref_indices = (peaks > 0).nonzero(as_tuple=True)[0]
+                if len(ref_indices) < 2:
+                    continue
 
-    def save_h5(self):
-        h5_path = os.path.join(self.output_dir, f'{self.out_filename}.h5')
-        with h5py.File(h5_path, 'w') as hf:
-            for win in self.windows_data:
-                subj_grp = hf.require_group(win['subject'])
-                win_grp = subj_grp.create_group(win['window_id'])
-                win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
-                win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
-                win_grp.create_dataset('raw_ekg', data=win['raw_ekg'], compression='gzip')
-                win_grp.create_dataset('raw_abp', data=win['raw_abp'], compression='gzip')
-                win_grp.create_dataset('y', data=win['y'], compression='gzip')
-                win_grp.attrs['ppg_fs'] = win['ppg_fs']
-                win_grp.attrs['raw_ppg_fs'] = win['raw_ppg_fs']
-                win_grp.attrs['ekg_fs'] = win['ekg_fs']
-                win_grp.attrs['abp_fs'] = win['abp_fs']
-                win_grp.attrs['rec_id'] = win['rec_id']
-                win_grp.attrs['label'] = win['label']
+                raw_notes = getattr(rec.fix, "subject_notes", None)
+                if raw_notes is None:
+                    notes = ""
+                elif isinstance(raw_notes, np.ndarray):
+                    if raw_notes.size == 0:
+                        notes = ""
+                    else:
+                        arr = raw_notes.tolist()
+                        notes = " ".join(str(x) for x in arr) if isinstance(arr, list) else str(arr)
+                else:
+                    notes = str(raw_notes)
+                win = {
+                    'subject': str(subj_id),
+                    'rec_id': str(rec_id),
+                    'window_id': str(uuid.uuid4()),
+                    'raw_ppg': raw_ppg,
+                    'proc_ppg': proc,
+                    'raw_ekg': raw_ekg,
+                    'raw_abp': raw_abp,
+                    'y': peaks,
+                    'ppg_fs': self.fs_out,
+                    'raw_ppg_fs': fs_ppg,
+                    'ekg_fs': fs_ekg,
+                    'abp_fs': fs_abp,
+                    'label': int(getattr(rec.fix, 'af_status', 0)),
+                    'notes': notes
+                }
+
                 try:
-                    win_grp.attrs['notes'] = win['notes']
-                except:
-                    win_grp.attrs['notes'] = ""
+                    self._write_window(win)
+                except Exception:
+                    logger.warning(f"Skipping window {win['window_id']} of record {rec_id}")
+        except Exception:
+            logger.exception(f"Error processing record {rec_id} for subject {subj_id}")
+
+
+    def _write_window(self, win: Dict[str, Any]) -> None:
+        """
+        Write a single window dictionary to an open HDF5 file (self.h5f).
+        Assumes self.h5f is an h5py.File opened in 'a' mode.
+        """
+        try:
+            subj_grp = self.h5f.require_group(win['subject'])
+            win_grp = subj_grp.create_group(win['window_id'])
+
+            # datasets
+            win_grp.create_dataset('raw_ppg', data=win['raw_ppg'], compression='gzip')
+            win_grp.create_dataset('proc_ppg', data=win['proc_ppg'], compression='gzip')
+            win_grp.create_dataset('raw_ekg', data=win['raw_ekg'], compression='gzip')
+            win_grp.create_dataset('raw_abp', data=win['raw_abp'], compression='gzip')
+            win_grp.create_dataset('y', data=win['y'], compression='gzip')
+
+            # attributes
+            attrs = ['ppg_fs', 'raw_ppg_fs', 'ekg_fs', 'abp_fs', 'rec_id', 'label', 'notes']
+            for attr in attrs:
+                win_grp.attrs[attr] = win.get(attr, '')
+        except Exception:
+            logger.exception(f"Failed to write window {win.get('window_id')} for subject {win.get('subject')}")
+            raise
+
+    def transform(self, recs: Any) -> None:
+        """
+        Process a batch of record objects by opening the HDF5 output
+        and streaming each record through _process_one_record.
+        """
+        # ensure output directory exists
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        h5_path = self.output_dir / f"{self.out_filename}.h5"
+        # open file (create if needed) in append mode
+        self.h5f = h5py.File(h5_path, "a")
+        try:
+            for rec in np.atleast_1d(recs):
+                self._process_one_record(rec)
+        finally:
+            self.h5f.close()
+
+    def save_h5(self) -> Path:
+        """
+        Open a brand-new HDF5 (overwriting any prior run), 
+        then stream every record → windows → disk via our
+        existing _process_one_record + _write_window helpers.
+        """
+        # build the path
+        h5_path = Path(self.output_dir) / f"{self.out_filename}.h5"
+        logger.info(f"Creating HDF5 @ {h5_path}")
+
+        # 'w' mode truncates any old file
+        with h5py.File(h5_path, "w") as hf:
+            # let our other methods see it as self.h5f
+            self.h5f = hf
+
+            # pull in all the records
+            recs = self.extract()
+
+            # ensure iterable even if single record
+            for rec in np.atleast_1d(recs):
+                self._process_one_record(rec)
+
+        logger.info(f"Finished writing HDF5 with processed windows")
         return h5_path
+
 
 
     def process(self):
@@ -147,20 +245,30 @@ class MimicETL:
 
 
 def main():
-    mimic_num = "3"
-    root_path = os.path.join(f'data/raw/mimic{mimic_num}_data/_mimic{mimic_num}_struct.mat')
-    out_filename = f'mimic{mimic_num}_db'
-    out_path = os.path.join(f'../data/processed/length_full/{out_filename}')
+    mimic_num = "4"
+
+    if mimic_num == "3":
+        fs_in = 125
+    elif mimic_num == "4":
+        fs_in = 62.5
+
+    # root_path = os.path.join(f'data/raw/mimic{mimic_num}_data/mimic{mimic_num}_struct.mat')
+    # out_filename = f'test_mimic{mimic_num}_db'
+    # out_path = os.path.join(f'../data/processed/length_full/{out_filename}')
+    ver_num = 1
+    root_path = os.path.join(f'data/raw/mimic{mimic_num}_data/mimic{mimic_num}_struct_v{ver_num}.mat')
+    out_filename = f'mimic{mimic_num}_db_v{ver_num}'
+    out_path = os.path.join(f'data/processed/length_full/{out_filename}')
     
     if not os.path.exists(out_path):
         os.mkdir(out_path)
     config = {
         "input_dir": root_path,
         "output_dir":  out_path,
-        "fs_in": 125.00,
+        "fs_in": fs_in,
         "fs_out": 20.83,
         'fs_ekg': 125,
-        "window_size_sec": 30,
+        "window_size_sec": 8,
         "scale_type": "norm",
         "decimate_signal": True,
         "zero_phase": True,
