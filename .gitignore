@@ -2,11 +2,12 @@
 __pycache__
 archive
 data
-notebooks/runs
-trained_models
+runs/*
+trained_model
 build
 heart_rhythm_analysis.egg-info
 peak_detector_results
+
 
 
 # File Types

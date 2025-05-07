@@ -1,15 +1,14 @@
-import os
+import os, logging, h5py
 import scipy.io as sio
 import numpy as np
-import h5py
 from pathlib import Path
-import logging
 from typing import Any, Dict
+
 logger = logging.getLogger(__name__)
 
 
 import uuid
-from heart_rhythm_analysis.utils.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal,pseudo_peak_vector
+from src.lib.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal, peak_vector
 
 
 
@@ -127,10 +126,10 @@ class MimicETL:
                         scaling_config = find_sliding_window(len(proc), target_windows = 5, overlap=25)
                     proc = scale_signal(proc, config = scaling_config, method = self.scale_type)
                 
-                peaks = np.asarray(pseudo_peak_vector(proc, fs=self.fs_out))
+                peaks = np.asarray(peak_vector(proc, fs=self.fs_out))
                 mask = peaks > 0 
                 ref_indices = np.flatnonzero(mask)
-                # ref_indices = (peaks > 0).nonzero(as_tuple=True)[0]
+                ref_indices = (peaks > 0).nonzero(as_tuple=True)[0]
                 if len(ref_indices) < 2:
                     continue
 
