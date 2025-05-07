@@ -6,9 +6,12 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-
 import uuid
-from src.lib.utils import clean_signal, decimate_signal,find_sliding_window,scale_signal, peak_vector
+from src.lib.utils.clean_signal import clean_signal
+from src.lib.utils.decimate_signal import decimate_signal
+from src.lib.utils.find_sliding_window import find_sliding_window
+from src.lib.utils.scale_signal import scale_signal
+from src.lib.utils.peak_detector import peak_detector
 
 
 
@@ -32,11 +35,9 @@ class MimicETL:
         logger.info(f"Derived allowed raw‐data root at {allowed_root}")
 
         self.out_filename = str(config.get("out_filename", "etl_output"))
+
         # 3) Set output_dir next to it (e.g. .../data/raw → .../data/processed)
-        self.output_dir = allowed_root.parent / f"processed/length_full/{self.out_filename}"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.output_dir, 0o750)
-        print(self.output_dir)
+        self.output_dir = Path(config["output_dir"]).resolve()
         # --- Pipeline parameters ---
         self.window_size_sec = int(config.get("window_size_sec", 30))
         self.fs_in = float(config.get("fs_in", 125.0))
@@ -126,11 +127,8 @@ class MimicETL:
                         scaling_config = find_sliding_window(len(proc), target_windows = 5, overlap=25)
                     proc = scale_signal(proc, config = scaling_config, method = self.scale_type)
                 
-                peaks = np.asarray(peak_vector(proc, fs=self.fs_out))
-                mask = peaks > 0 
-                ref_indices = np.flatnonzero(mask)
-                ref_indices = (peaks > 0).nonzero(as_tuple=True)[0]
-                if len(ref_indices) < 2:
+                peaks = np.asarray(peak_detector(proc, fs=self.fs_out))
+                if sum(peaks) < 2:
                     continue
 
                 raw_notes = getattr(rec.fix, "subject_notes", None)
@@ -201,7 +199,7 @@ class MimicETL:
         # ensure output directory exists
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        h5_path = self.output_dir / f"{self.out_filename}.h5"
+        h5_path = Path(self.output_dir) / f"{self.out_filename}.h5"
         # open file (create if needed) in append mode
         self.h5f = h5py.File(h5_path, "a")
         try:
@@ -255,8 +253,8 @@ def main():
     # out_filename = f'test_mimic{mimic_num}_db'
     # out_path = os.path.join(f'../data/processed/length_full/{out_filename}')
     ver_num = 1
-    root_path = os.path.join(f'data/raw/mimic{mimic_num}_data/mimic{mimic_num}_struct_v{ver_num}.mat')
-    out_filename = f'mimic{mimic_num}_db_v{ver_num}'
+    root_path = os.path.join(f'/Users/shayanriyaz/Documents/Projects/heart_rhythm_analysis/data/raw/mimic3_data/mimic3_data_450_v1.mat')
+    out_filename = f'mimic{mimic_num}_db_v{ver_num}_test'
     out_path = os.path.join(f'data/processed/length_full/{out_filename}')
     
     if not os.path.exists(out_path):

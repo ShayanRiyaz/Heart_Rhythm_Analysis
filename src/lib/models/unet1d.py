@@ -231,12 +231,8 @@ class LearnablePeakExtractor(nn.Module):
         gate = torch.sigmoid(self.sharpness * (peak_map - thresh))  # [B, L]
 
         # 3) local‐max mask (soft)
-        padded = F.pad(peak_map.unsqueeze(1),
-                       (self.min_distance,)*2,
-                       mode='replicate')
-        pooled = F.max_pool1d(padded,
-                              kernel_size=2*self.min_distance+1,
-                              stride=1).squeeze(1)                # [B, L]
+        padded = F.pad(peak_map.unsqueeze(1), (self.min_distance,)*2, mode='replicate')
+        pooled = F.max_pool1d(padded,kernel_size=2*self.min_distance+1,stride=1).squeeze(1)                # [B, L]
         local_mask = torch.sigmoid(self.sharpness * (peak_map - pooled))
 
         # 4) combine into a smooth “peakness” map

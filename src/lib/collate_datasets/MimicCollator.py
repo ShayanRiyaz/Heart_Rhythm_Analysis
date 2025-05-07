@@ -1,24 +1,16 @@
 from rich import print
 from rich.console import Console
-import os
-import requests
-import gzip
-import shutil
+import os,time,json,glob, re, requests
 import pandas as pd
 import numpy as np
 import wfdb
 from scipy.io import savemat
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
-import json
-import glob, re
 from pathlib import Path
 from typing import Iterator, Optional, Tuple, Dict, Any
 from datetime import datetime
 
 session = requests.Session()
-
-
 
 
 def find_matching_rows(df, columns, match_strings):
@@ -59,17 +51,9 @@ class MimicCollator():
         self.categories_of_interest = config.get("substring_to_match",["sinus rhythm"])
         if self.mimic_num != "4":
             self.categories_of_interest = []
+
+        self.MAX_SET_SIZE = 50
         
-        # if len(self.categories_of_interest) > 1:
-        #     self.categories_of_interest = self.categories_of_interest[0]
-        #     out_filename =  f"{self.outfile_version}_mimic{self.mimic_num}_{self.categories_of_interest.replace(" ","_") if len(self.categories_of_interest) != 0  else ''}_struct.mat"
-        #     self.out_path = os.path.join(self.root_dir,out_filename)
-        # else:
-        #     out_filename = f"{self.outfile_version}_mimic{self.mimic_num}{self.custom_records['name'] if self.custom_records['name'] is not None else ""}_structt.mat"
-        #     out_filename = out_filename[1:] if out_filename[0] == '_' else out_filename
-        #     self.out_path = os.path.join(self.root_dir,out_filename )
-
-
     def collate_dataset(self, load_metadata=True, load_waveforms=True, download_waveforms=False):
 
         start_time1 = time.time()
@@ -106,10 +90,12 @@ class MimicCollator():
                 mimic_path=self.mimic_path,
                 mimic_num=self.mimic_num
             )
-            out = Path(self.root_dir) / f"mimic{self.mimic_num}_{self.num_subjects}_best_records.csv"
+            
+            out = Path(self.root_dir) / f"mimic{self.mimic_num}_{df.shape[0]}_best_records.csv"
             df.to_csv(out, index=False)
             print(f"Wrote new {out.name}")
-
+        if self.num_subjects > df.shape[0]:
+            self.num_subjects = df.shape[0]
         if load_waveforms:
             self.scan_waveform_directory(match_records,record_info = df)
 
@@ -237,7 +223,8 @@ class MimicCollator():
             if mimic_num == "3":
                 if signal_length_header.record_name[-1] == "n":
                     continue
-            possible_signals_hdr = wfdb.rdheader(signal_name_file, pn_dir=base_pn_dir)
+            # possible_signals_hdr = wfdb.rdheader(signal_name_file, pn_dir=base_pn_dir)
+            possible_signals_hdr = self.load_folder_header(base_pn_dir, signal_name_file + '____')
             
             try:
                 possible_signals = [s.lower() for s in possible_signals_hdr.sig_name]
@@ -245,8 +232,6 @@ class MimicCollator():
                 possible_signals = []
 
             seg_names = signal_length_header.seg_name or []
-            fs = signal_length_header.fs
-
             seg_lengths = np.atleast_1d(signal_length_header.seg_len)
             seg_info = list(zip(seg_names, seg_lengths))
             seg_info.sort(key=lambda pair: pair[1], reverse=True)
@@ -293,7 +278,7 @@ class MimicCollator():
                     "file_id":  seg_name,
                     "seg_len":   seg_hdr.sig_len,
                     "max_freq":  max_freq,
-                    "signals":   actual_signals
+                    "signals":   actual_signals,
                 })
                 time_end1 = time.time() - time_start1
                 print(f'Time to Store {len(infos)}, Records: {time_end1:.2f}')
@@ -314,7 +299,7 @@ class MimicCollator():
         meta_path = os.path.join(self.out_dir, f"mimic{self.mimic_num}_records_metadata.json")
         with open(meta_path, "w") as mf:
             json.dump(meta, mf, indent=2)
-        print(f"📋 Saved metadata → {meta_path}")
+        print(f"Saved metadata → {meta_path}")
         return df
 
     def setup_paths(self):
@@ -323,16 +308,16 @@ class MimicCollator():
             raise FileNotFoundError(f"Root folder does not exist: {self.root_dir}")
         print("Working directory verified:", self.root_dir)
 
-    def download_and_extract_gz(self, url, out_path):
-        print(f"Downloading from {url}")
-        gz_path = out_path + ".gz"
-        with requests.get(url, stream=True) as r:
-            r.raise_for_status()
-            with open(gz_path, 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
-        with gzip.open(gz_path, 'rb') as f_in, open(out_path, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
-        os.remove(gz_path)
+    # def download_and_extract_gz(self, url, out_path):
+    #     print(f"Downloading from {url}")
+    #     gz_path = out_path + ".gz"
+    #     with requests.get(url, stream=True) as r:
+    #         r.raise_for_status()
+    #         with open(gz_path, 'wb') as f:
+    #             shutil.copyfileobj(r.raw, f)
+    #     with gzip.open(gz_path, 'rb') as f_in, open(out_path, 'wb') as f_out:
+    #         shutil.copyfileobj(f_in, f_out)
+    #     os.remove(gz_path)
 
     # def ensure_metadata_downloaded(self):
     #     admissions_path = os.path.join(self.out_dir, "ADMISSIONS.csv")
@@ -358,7 +343,6 @@ class MimicCollator():
     #                   patients[['SUBJECT_ID', 'GENDER', 'DOB']],
     #                   on='SUBJECT_ID')
     #     self.ethnicity_data = df
-
 
 
     def prepare_mimic3_record_list(self):
@@ -496,16 +480,23 @@ class MimicCollator():
             sigs = [s.lower() for s in fh.sig_name]
             if not all(lbl in sigs for lbl in self.ecg_ppg_labels):  continue
             if not any(lbl in sigs for lbl in self.abp_labels):     continue
-            return nm
+            ppg_i = sigs.index(self.ecg_ppg_labels[0])
+            ecg_i = sigs.index(self.ecg_ppg_labels[1])
+            abp_l = next(l for l in self.abp_labels if l in sigs)
+            abp_i = sigs.index(abp_l)
+
+            return nm,[ppg_i,ecg_i,abp_i]
         return None
 
     def load_waveform(self,
         segment_name: str,
         pn_dir: str,
-        sample_to: int
+        sampfrom: int,
+        sampleto: int,
+        channels: list
     ):
         """Return the rdrecord object truncated to sample_to."""
-        return wfdb.rdrecord(segment_name, pn_dir=pn_dir, sampto=sample_to)
+        return wfdb.rdrecord(segment_name, pn_dir=pn_dir,sampfrom=sampfrom, sampto=sampleto,channels = channels,return_res=32)
 
     def extract_notes(self,
         df_categories: Dict[str,Any],
@@ -515,9 +506,11 @@ class MimicCollator():
         df = df_categories.get("curr_measurement_df")
         cols = df_categories.get("report_columns", [])
         if df is None or not cols:
-            return []
+            return [""]
         filt = df["subject_id"] == subj_id_ecg
         texts = df.loc[filt, cols].fillna("").agg(" ".join, axis=1)
+        if texts.empty: 
+            return [""]
         return texts.str.lower().unique().tolist()
 
     def build_subject_data(self,
@@ -526,14 +519,15 @@ class MimicCollator():
         subj_id: str,
         rec_id: str,
         file_id: str,
+        channel_idxs: list,
         notes: Any,
     ) -> Dict[str,Any]:
         """Compose the dict for this one subject."""
         sigs = [s.lower() for s in record.sig_name]
-        ppg_i = sigs.index(self.ecg_ppg_labels[0])
-        ecg_i = sigs.index(self.ecg_ppg_labels[1])
+        # ppg_i = sigs.index(self.ecg_ppg_labels[0])
+        # ecg_i = sigs.index(self.ecg_ppg_labels[1])
         abp_l = next(l for l in self.abp_labels if l in sigs)
-        abp_i = sigs.index(abp_l)
+        # abp_i = sigs.index(abp_l)
 
         return {
         "fix": {
@@ -544,77 +538,204 @@ class MimicCollator():
             "subject_notes": notes
         },
         "ppg": {
-            "v":      record.p_signal[:, ppg_i],
+            "v":      record.p_signal[:, 0],
             "fs":     record.fs,
-            "method": "PPG from .hea/.dat"
+            "method": "pleth from .hea/.dat",
+            "label" : "pleth"
         },
         "ekg": {
-            "v":      record.p_signal[:, ecg_i],
-            "fs":     125,
+            "v":      record.p_signal[:, 1],
+            "fs":     record.fs,
             "method": "ECG from lead II",
-            "label":  "II"
+            "label":  "ii"
         },
         "bp": {
-            "v":      record.p_signal[:, abp_i],
+            "v":      record.p_signal[:, 2],
             "fs":     record.fs,
-            "method": f"{abp_l} from .hea/.dat"
+            "method": f"{abp_l} from .hea/.dat",
+            "label":  abp_l
         }
         }
+
+
+
+    def _process_single_record(self, args):
+        """
+        Worker for one (idx, curr_record) tuple.
+        Returns a dict of subject_data or None on failure / skip.
+        """
+        idx, curr_record, df_categories, record_info = args
+        start_len  = 60*5
+        min_len_s  = 60 * self.min_minutes + start_len
+        
+        try:
+            pn_dir, hea_file, rec_id, file_id = self.compute_paths(
+                curr_record, idx, record_info, df_categories
+            )
+            folder_hdr = self.load_folder_header(pn_dir, hea_file)
+            seg, channels = self.choose_segment(
+                folder_hdr, pn_dir, min_len_s*folder_hdr.fs
+            )
+            if not seg:
+                return None
+
+            record = self.load_waveform(
+                seg, pn_dir,
+                sampfrom=int(start_len*folder_hdr.fs),
+                sampleto=int(min_len_s*folder_hdr.fs),
+                channels=channels
+            )
+
+            subj_id     = curr_record.split("/")[-2]
+            subj_notes  = self.extract_notes(df_categories, int(subj_id[1:]))
+            data        = self.build_subject_data(
+                record, seg, subj_id, rec_id, file_id, channels, subj_notes
+            )
+            return data
+
+        except Exception as e:
+            if self.bVerbose:
+                print(f"Skipping {curr_record!r}: {e}")
+            return None
+
 
     def scan_waveform_directory(self,
-        df_categories: Dict[str,Any],
-        record_info: Optional[pd.DataFrame],
-    ) -> list:
-        subject_data = []
-        min_len_s = 60 * self.min_minutes
-        for idx, curr_record in self.get_records_iterator(df_categories, record_info):
-            if len(subject_data) >= self.num_subjects:
-                break
+                                df_categories: Dict[str,Any],
+                                record_info: Optional[pd.DataFrame],
+                                max_workers:int = 8) -> list:
+        """
+        Parallelized scan over get_records_iterator.
+        """
+        subject_data      = []
+        set_num           = 0
+        num_subjects_added = 0
 
-            pn_dir, hea_file, rec_id, file_id = self.compute_paths(
-                curr_record,idx, record_info, df_categories)
+        # Prepare an iterator of arguments for each record
+        arg_iter = [
+            (idx, rec, df_categories, record_info)
+            for idx, rec in self.get_records_iterator(df_categories, record_info)
+        ]
+        with ThreadPoolExecutor(max_workers=max_workers) as exe:
+            futures = {exe.submit(self._process_single_record, args): args for args in arg_iter}        
+            for fut in as_completed(futures):
+                if num_subjects_added >= self.num_subjects:
+                    break
 
-            try:
-                folder_hdr = self.load_folder_header(pn_dir, hea_file)
-            except Exception as e:
+                data = fut.result()
+                if data is None:
+                    continue
+
+                subject_data.append(data)
+                num_subjects_added += 1
                 if self.bVerbose:
-                    print(f"✖ load_folder_header failed ({pn_dir}/{hea_file}): {e}")
-                continue
+                    # print(f"Added subject: {num_subjects_added}")
+                    print(f"Added Subject ({num_subjects_added}/{self.num_subjects})")
+                if num_subjects_added >= self.MAX_SET_SIZE:
+                    set_num += 1
+                    folder_name = 'subject_sets'
+                    fname = f"mimic{self.mimic_num}_data_{self.num_subjects}_{set_num}_v{self.version_num}.mat"
+                    out_dir = os.path.join(self.root_dir, folder_name)
+                    out_path = os.path.join(out_dir, fname)
+                    if not os.path.exists(out_dir):
+                        os.mkdir(out_dir)
 
-            seg = self.choose_segment(folder_hdr,pn_dir,min_len_s*folder_hdr.fs)
-            if not seg:
-                if self.bVerbose:
-                    print(f"↷ No valid segment in {curr_record}")
-                continue
-
-            try:
-                record = self.load_waveform(seg, pn_dir, sample_to=min_len_s*folder_hdr.fs)
-            except Exception as e:
-                if self.bVerbose:
-                    print(f"✖ load_waveform failed ({pn_dir}/{seg}): {e}")
-                continue
-
-            subj_id = curr_record.split("/")[-2]
-            subj_notes = self.extract_notes(df_categories, int(subj_id[1:]))
-            data = self.build_subject_data(record, seg, subj_id, rec_id, file_id,subj_notes)
-            subject_data.append(data)
-            if self.bVerbose:
-                print(f"✔ Added {subj_id} ({len(subject_data)}/{self.num_subjects})")
-        if subject_data:
-            # choose an output filepath
-            out_path = getattr(self, 'out_path', None)
-            if not out_path:
-                # fallback to a sensible default in your root_dir
-                fname = f"mimic{self.mimic_num}_data_{self.num_subjects}_v{self.version_num}.mat"
-                out_path = os.path.join(self.root_dir, fname)
-
-            # actually write the .mat
-            savemat(out_path, {'data': subject_data})
-            if self.bVerbose: print(f"Saved {len(subject_data)} subjects → {out_path}")
-        else:
-            if self.bVerbose: print("No subjects passed all filters; nothing saved.")
+                    savemat(out_path, {'data': subject_data})
+                    if self.bVerbose:
+                        print(f"Saved {len(subject_data)} Subjects → {fname}")
+                    subject_data = []
+                    num_subjects_added = 0
 
         return subject_data
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # def scan_waveform_directory(self,
+    #     df_categories: Dict[str,Any],
+    #     record_info: Optional[pd.DataFrame],
+    # ) -> list:
+    #     subject_data = []
+    #     num_subjects_added = 0
+    #     set_num = 0
+    #     num_passes = 0
+    #     start_len = 60*5
+    #     min_len_s = 60 * self.min_minutes + start_len
+    #     bTimeSystem = 1
+    #     for idx, curr_record in self.get_records_iterator(df_categories, record_info):
+    #         num_passes+=1
+    #         if len(subject_data) >= self.num_subjects:
+    #             break
+    #         if bTimeSystem: time1s = time.time()
+    #         pn_dir, hea_file, rec_id, file_id = self.compute_paths(
+    #             curr_record,idx, record_info, df_categories)
+            
+    #         if bTimeSystem: print(f'Time compute_paths:\t\t {time.time() - time1s:.2f}')
+            
+    #         if bTimeSystem: time1s = time.time()
+    #         try:
+    #             folder_hdr = self.load_folder_header(pn_dir, hea_file)
+    #         except Exception as e:
+    #             if self.bVerbose:
+    #                 print(f"✖ load_folder_header failed ({pn_dir}/{hea_file}): {e}")
+    #             continue
+    #         if bTimeSystem: print(f'Time load_folder_header:\t {time.time() - time1s:.2f}')
+
+
+    #         if bTimeSystem: time1s = time.time()
+    #         seg,channels = self.choose_segment(folder_hdr,pn_dir,min_len_s*folder_hdr.fs)
+    #         if not seg:
+    #             if self.bVerbose:
+    #                 print(f"↷ No valid segment in {curr_record}")
+    #             continue
+    #         if bTimeSystem: print(f'Time choose_segment:\t\t {time.time() - time1s:.2f}')
+
+    #         if bTimeSystem: time1s = time.time()
+    #         try:
+    #             record = self.load_waveform(seg, pn_dir,sampfrom=int(start_len*folder_hdr.fs) ,sampleto=int(min_len_s*folder_hdr.fs),channels=channels)
+    #         except Exception as e:
+    #             if self.bVerbose:
+    #                 print(f"✖ load_waveform failed ({pn_dir}/{seg}): {e}")
+    #             continue
+    #         if bTimeSystem: print(f'Time load_waveform:\t\t {time.time() - time1s:.2f}')
+
+    #         if bTimeSystem: time1s = time.time()
+    #         subj_id = curr_record.split("/")[-2]
+    #         subj_notes = self.extract_notes(df_categories, int(subj_id[1:]))
+    #         data = self.build_subject_data(record, seg, subj_id, rec_id, file_id,channels,subj_notes)
+    #         subject_data.append(data)
+    #         if bTimeSystem: print(f'Time notes_to_append:\t\t {time.time() - time1s:.2f}')
+
+    #         if self.bVerbose:
+    #             print(f"✔ Added {subj_id} ({len(subject_data)}/{self.num_subjects})")
+    #         num_subjects_added +=1
+            
+    #         if ((num_subjects_added >= self.MAX_SET_SIZE) or (num_passes == (len(df_categories['matching_records'])))) and subject_data:
+    #             out_path = getattr(self, 'out_path', None)
+    #             if not out_path:
+    #                 set_num +=1
+    #                 fname = f"subject_sets/mimic{self.mimic_num}_data_{self.num_subjects}_{set_num}_v{self.version_num}.mat"
+    #                 out_path = os.path.join(self.root_dir, fname)
+    #                 if not os.path.exists(out_path):
+    #                     os.mkdirs(out_path)
+    #             # actually write the .mat
+    #             savemat(out_path, {'data': subject_data})
+    #             if self.bVerbose: print(f"Saved {len(subject_data)} subjects → {out_path}")
+    #             subject_data = []
+    #             num_subjects_added = 0
+    #         # else:
+    #             # if self.bVerbose: print("No subjects passed all filters; nothing saved.")
+    #     return subject_data
 
     # def scan_waveform_directory(self,df_categories,record_info=None):
     #     print("Scanning for waveform files...")
@@ -767,7 +888,7 @@ class MimicCollator():
 if __name__ == "__main__":
     # mimic_num = "3"
     ver_num = 2
-    for mimic_num in ["3","4"]:
+    for mimic_num in ["4"]:
         MIMIC_3_CUSTOM_DATASET = {}
         MIMIC_3_CUSTOM_DATASET['all_label'] = [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1]
         MIMIC_3_CUSTOM_DATASET['all_filename'] = ['p000608-2167-03-09-11-54','p000776-2184-04-30-15-16', 'p000946-2120-05-14-08-08', 'p004490-2151-01-07-12-36', 'p004829-2103-08-30-21-52', 'p075796-2198-07-25-23-40', 'p009526-2113-11-17-02-12', 'p010391-2183-12-25-10-15', 'p013072-2194-01-22-16-13', 'p013136-2133-11-09-16-58', 'p014079-2182-09-24-13-41', 'p015852-2148-05-03-18-39', 'p016684-2188-01-29-00-06', 'p017344-2169-07-17-17-32', 'p019608-2125-02-05-04-57', 'p022954-2136-02-29-17-52', 'p023824-2182-11-27-14-22', 'p025117-2202-03-15-20-28', 'p026377-2111-11-17-16-46', 'p026964-2147-01-11-18-03', 'p029512-2188-02-27-18-10', 'p043613-2185-01-18-23-52', 'p050089-2157-08-23-16-37', 'p050384-2195-01-30-02-21', 'p055204-2132-06-30-09-34', 'p058932-2120-10-13-23-15', 'p062160-2153-10-03-14-49', 'p063039-2157-03-29-13-35', 'p063628-2176-07-02-20-38', 'p068956-2107-04-21-16-05', 'p069339-2133-12-09-21-14', 'p075371-2119-08-22-00-53', 'p077729-2120-08-31-01-03', 'p087275-2108-08-29-12-53', 'p079998-2101-10-21-21-31', 'p081349-2120-02-11-06-35', 'p085866-2178-03-20-17-11', 'p087675-2104-12-05-03-53', 'p089565-2174-05-12-00-07', 'p089964-2154-05-21-14-53', 'p092289-2183-03-17-23-12', 'p092846-2129-12-21-13-12', 'p094847-2112-02-12-19-56', 'p097547-2125-10-21-23-43', 'p099674-2105-06-13-00-07']
@@ -809,7 +930,7 @@ if __name__ == "__main__":
                 }
             },
             "ethnicity_extract": False, 
-            "num_subjects": 1500,
+            "num_subjects": 50,
             "mimic_info": {
                 "mimic_num": mimic_num,
                 "mimic_path": mimic_path,

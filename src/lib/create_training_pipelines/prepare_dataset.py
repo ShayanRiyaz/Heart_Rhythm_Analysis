@@ -42,10 +42,6 @@ def my_split_and_save(file_paths: List[str], train_ratio: float = 0.8, output_di
         random_state=42
     )
 
-    # split_index = int(len(all_windows) * train_ratio)
-    # train_windows = all_windows[:split_index]
-    # test_windows = all_windows[split_index:]
-
     train_path = os.path.join(output_dir, "train_dataset.h5")
     test_path = os.path.join(output_dir, "test_dataset.h5")
 

@@ -25,7 +25,7 @@ config.DEC_FACTOR   = 6
 config.FS           = round(config.FS_ORIGINAL / config.DEC_FACTOR, 2)
 config.WIN_LEN      = int(round(config.WIN_SEC * config.FS))
 config.BATCH        = 32
-config.EPOCHS       = 200
+config.EPOCHS       = 1000
 config.VAR_MULT     = 500  # for any variance scaling if needed
 # Paths
 config.paths = SimpleNamespace()
@@ -44,11 +44,13 @@ config.checkpoint.RESUME                = False
 config.model = SimpleNamespace()
 config.model.BASE_CHANNELS = 32
 config.model.MODEL_DEPTH = 3
-config.model.LossPosWeights = 4.10
+config.model.LossPosWeights = 4.09
 
 
 config.plotting = SimpleNamespace()
-config.plotting.save_dir =os.path.join(os.getcwd(),'peak_detector_results')
+config.plotting.save_dir =os.path.join(os.getcwd(),'trained_model')
+config.plotting.make_plots = True
+config.plotting.return_fig = True
 
 if not os.path.exists(config.checkpoint.CKPT_DIR):
     os.makedirs(config.checkpoint.CKPT_DIR)
