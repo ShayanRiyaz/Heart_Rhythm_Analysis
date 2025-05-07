@@ -1,17 +1,23 @@
-__pycache__/
-__pycache__/*.*
-downloaded_files
-downloaded_files/*/*.*
-downloaded_files/*.*
-*.mat
-*.m
-
-*.DS_Store
-*.pth
-trained_models
+# Folders, subfolders
+__pycache__
 archive
 data
-checkpoints
-
+runs/*
+trained_model
 build
 heart_rhythm_analysis.egg-info
+peak_detector_results
+
+
+
+# File Types
+*.mat
+*.m
+*.DS_Store
+*.pkg
+*.pth
+*.mp4
+
+# Specific Files
+dev_model copy.py
+dev_model.py
