@@ -119,8 +119,8 @@ def peak_detection_loss(outputs,
                         raw_signal,       # (B, 1, L) original PPG for recon
                         pos_weight=None,  # scalar weight for positives
                         peak_extractor = None,
-                        alpha=0.7,
-                        beta=0.3):
+                        alpha=0.5,
+                        beta=0.5):
     """
     outputs: dict with
         'signal':    (B, L) reconstructed signal

@@ -532,7 +532,9 @@ class MimicCollator():
     
 
 
-    def extract_notes(self,df_categories,subj_id_ecg
+    def extract_notes(self,
+        df_categories: Dict[str,Any],
+        subj_id_ecg: int
     ) -> Any:
         """Pull out the free-text notes for this subject (MIMIC-4 only)."""
         df = df_categories.get("curr_measurement_df")

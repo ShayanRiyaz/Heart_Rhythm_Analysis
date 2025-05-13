@@ -9,12 +9,13 @@ The purpose of this project is to explore Heart Rhythms using:
 2) Machine/Deep Learning
 3) Causal Analysis/Inference
 ## Dataset
-Currently I am using small AFib/NSR Dataset (~35 subjects) from the MIMIC III via physionet. I converted **[Peter Charlton's](https://github.com/peterhcharlton/ppg-beats)** [collate_mimic_perform_af_dataset](https://github.com/peterhcharlton/ppg-beats/blob/main/source/collate_mimic_perform_af_dataset.m) script for extracting the data from Matlab to python. (Using a max of LLMs and my own intuiton). Next I used the [MSPTDfast](https://iopscience.iop.org/article/10.1088/1361-6579/adb89e) peak detection [algorithm](https://github.com/peterhcharlton/ppg-beats/blob/main/source/msptdfastv2_beat_detector.m) (again by Peter Charlton & again converted using LLM and my own understanding of the algorithm.). 
+Currently I am using ~450 subject MIMIC III subject via physionet. I converted **[Peter Charlton's](https://github.com/peterhcharlton/ppg-beats)** [collate_mimic_perform_af_dataset](https://github.com/peterhcharlton/ppg-beats/blob/main/source/collate_mimic_perform_af_dataset.m) script for extracting the data from Matlab to python. (Using a mix of LLMs and my own intuiton). Next I used the [MSPTDfast](https://iopscience.iop.org/article/10.1088/1361-6579/adb89e) peak detection [algorithm](https://github.com/peterhcharlton/ppg-beats/blob/main/source/msptdfastv2_beat_detector.m) (again by Peter Charlton & again converted using LLM and my own understanding of the algorithm.). 
 
 **Datasets Prepared:**
 - Training and Validation
-    - MIMIC III AFib and Sinus Rhythm Subset (~35 subejects)
-    - MIMIC IV AFib and Sinus Rhythm Subject (~50 Subjects)
+    - (MIMIC III - Waveform)[https://physionet.org/files/mimic3wdb/1.0/matched/]
+    - (MIMIC IV - Waveform)[https://physionet.org/files/mimic4wdb/0.1.0/]
+      - (MIMIC IV ECG - Matched)[https://physionet.org/files/mimic-iv-ecg/1.0/] Mainly notes to classify subject diseases
   
 - Testing
   - CapnoBase 
@@ -43,3 +44,6 @@ Goals:
 - Charlton, P. H. (n.d.). PPG-Beats. https://ppg-beats.readthedocs.io/en/latest/
 **AF Annotations**
 -  https://figshare.com/articles/dataset/Atrial_Fibrillation_annotations_of_electrocardiogram_from_MIMIC_III_matched_subset/12149091/1 
+-  
+Dataset Reference:
+- Moody, B., Hao, S., Gow, B., Pollard, T., Zong, W., & Mark, R. (2022). MIMIC-IV Waveform Database (version 0.1.0). PhysioNet. https://doi.org/10.13026/a2mw-f949.

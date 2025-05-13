@@ -66,9 +66,22 @@ def make_window_figure(window, specs):
 
     fig.update_layout(
         height=300 * len(plot_ids),
-        title_text=f"Subject {window['subject']} – Window {window['window_count']}",
+        title_text=f"Subject {window['subject']}",
+        # – Window {np.sum(window['window_count'])}",
         showlegend=True
     )
+
+    fig.update_layout(
+    annotations=[
+        dict(
+            text="Right Subplot Title",
+            x=3, y=1,  # These coords work well for (row=1, col=2)
+            xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(size=14)
+        )
+    ]
+)
 
     return fig
 

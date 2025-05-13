@@ -133,80 +133,18 @@ class NeuralPeakDetector(nn.Module):
         # Generate both outputs
         signal_output = self.signal_head(x).squeeze(1)
         peak_output = self.peak_head(x).squeeze(1)
-        
 
-        # recon = signal_output[0].detach().cpu().numpy()
-        # pp = peak_output[0].detach().cpu().numpy()
-        # plt.figure()
-        # plt.plot(recon, label='Reconstruction')
-        # plt.scatter(np.arange(1,168),peak_output[0].detach().cpu().numpy(),color='red',marker='o',s=80,label='Predicted Peaks')
-        # plt.title("Reconstructed Signal with Predicted Peaks")
-        # plt.legend()
-        # plt.show()
 
         return {
             'signal': signal_output,
             'peak_map': peak_output
         }
 
-# class DifferentiablePeakExtractor(nn.Module):
-#     """
-#     Neural differentiable peak extraction module
-#     """
-#     def __init__(self, threshold=0.5, min_distance=10):
-#         super().__init__()
-#         self.threshold = threshold
-#         self.min_distance = min_distance
-        
-#     def forward(self, peak_map):
-#         """
-#         Extracts peaks from the peak probability map
-        
-#         Args:
-#             peak_map: Tensor of shape [B, L] containing peak probabilities
-            
-#         Returns:
-#             peak_indices: List of tensors containing peak indices for each batch
-#             peak_values: List of tensors containing peak values for each batch
-#         """
-#         batch_size = peak_map.shape[0]
-#         peak_indices = []
-#         peak_values = []
-        
-#         for b in range(batch_size):
-#             # 1. Threshold the peak map
-#             above_threshold = (peak_map[b] > self.threshold).float()
-            
-#             # 2. Local maximum filtering (non-maximum suppression)
-#             # Apply max pooling and check where values are preserved
-#             padded = F.pad(peak_map[b].unsqueeze(0).unsqueeze(0), 
-#                           (self.min_distance, self.min_distance), 
-#                           mode='replicate')
-            
-#             max_pooled = F.max_pool1d(padded, kernel_size=2*self.min_distance+1, 
-#                                      stride=1)
-            
-#             # Points that are both above threshold AND local maxima
-#             is_peak = above_threshold * (peak_map[b] == max_pooled.squeeze()).float()
-            
-#             # Get indices and values
-#             indices = torch.nonzero(is_peak).squeeze(-1)
-#             values = peak_map[b][indices]
-            
-#             peak_indices.append(indices)
-#             peak_values.append(values)
-        
-#         return peak_indices, peak_values
-
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-
 class LearnablePeakExtractor(nn.Module):
     """
     Differentiable extractor with a trainable threshold.
     """
-    def __init__(self, init_thresh=0.1, min_distance=2, sharpness=10.0):
+    def __init__(self, init_thresh=0.2, min_distance=2, sharpness=15.0):
         super().__init__()
         # store threshold in logit-space so it’s unconstrained
         self.logit_thresh = nn.Parameter(torch.logit(torch.tensor(init_thresh)))

@@ -36,10 +36,10 @@ def train(config):
     tensorboard_path = os.path.join(config.plotting.save_dir,f"runs/exp/{config.checkpoint.MODEL_NAME}")
     writer = SummaryWriter(log_dir=tensorboard_path)
     
-    model = NeuralPeakDetector(     cin=1,
+    model = NeuralPeakDetector( cin=config.model.C_IN,
         base=config.model.BASE_CHANNELS,
         depth=config.model.MODEL_DEPTH,
-        dropout=0.1).to(device)
+        dropout=config.model.DROP_OUT).to(device)
     
     training_history = {
         'train_loss': [],
@@ -72,13 +72,12 @@ def train(config):
 
     pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32, device=device)
     # optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
-    # peak_extractor = DifferentiablePeakExtractor(threshold=0.5, min_distance=10)
     peak_extractor = LearnablePeakExtractor(init_thresh=0.4)
     optimizer = torch.optim.AdamW(list(model.parameters()) + list(peak_extractor.parameters()),lr=5e-4, weight_decay=1e-4)
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        # optimizer, mode='max', patience=3, factor=0.8, threshold_mode='rel'
-    # )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', patience=3, factor=0.8, threshold_mode='rel'
+    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
     stopper = EarlyStoppingBasic(patience=5, min_delta=1e-4)
 
 
@@ -150,14 +149,15 @@ def train(config):
                             return_fig         = config.plotting.return_fig,
                             config = config)
         
-        scheduler.step()
-
+        
         # Calculate epoch metrics
         avg_train_loss = np.mean([l['total_loss'] for l in train_losses])
         avg_val_loss = np.mean([l['total_loss'] for l in val_losses])
         avg_precision = np.mean([m['precision'] for m in peak_accuracy_metrics])
         avg_recall = np.mean([m['recall'] for m in peak_accuracy_metrics])
         avg_f1 = np.mean([m['f1'] for m in peak_accuracy_metrics])
+
+        scheduler.step(avg_val_loss)
         
         # Save metrics for plotting
         training_history['train_loss'].append(avg_train_loss)
@@ -183,13 +183,11 @@ def train(config):
                 'optim': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict()
             }, os.path.join(config.checkpoint.CKPT_DIR, f'ckpt_epoch_{epoch}.pth'))
-            # --- 1) generate & save a debug frame for this checkpoint
+
             if config.plotting.make_plots:
-                # --- 2) stitch all frames into a video up to this checkpoint
                 video_path = os.path.join(config.plotting.save_dir,f"training_progress_up_to_epoch_{epoch:03d}.mp4")
                 create_training_video_from_frames(os.path.join(frames_dir, "imageNum_*_epoch_*.png"),video_path,fps=5)
 
-        # Early stopping
         if stopper.step(avg_val_loss):
             print('Early stopping at epoch', epoch)
             break

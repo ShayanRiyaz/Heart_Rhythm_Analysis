@@ -47,7 +47,7 @@ class MimicETL:
         if self.fs_in == self.fs_out and config.get("decimate_signal", False):
             logger.warning(f"fs_in ({self.fs_in}) == fs_out ({self.fs_out}); disabling decimation.")
 
-        self.lowpass_cutoff = float(config.get("lowpass_cutoff", 8.0))
+        self.lowpass_cutoff =float(config.get("lowpass_cutoff", 0.0))
         self.fir_numtaps = int(config.get("fir_numtaps", 33))
         self.zero_phase = bool(config.get("zero_phase", True))
         self.scale_type = config.get("scale_type")
