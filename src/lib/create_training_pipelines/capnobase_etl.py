@@ -7,9 +7,8 @@ import uuid
 import zarr
 import h5py
 import pandas as pd
-import heart_rhythm_analysis 
-from heart_rhythm_analysis.peak_detectors.mmpvd2 import MSPTDFastV2BeatDetector
-from heart_rhythm_analysis.utils.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal,pseudo_peak_vector
+from src.lib.utils.mmpvd2 import MSPTDFastV2BeatDetector
+from src.lib.utils import decimate_signal,clean_signal,find_sliding_window,scale_signal,peak_detector
 
 class CapnoBaseETL:
     """

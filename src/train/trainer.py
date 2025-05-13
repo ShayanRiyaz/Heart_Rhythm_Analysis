@@ -33,13 +33,13 @@ def train(config):
     os.makedirs(frames_dir, exist_ok=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'mps'
-    tensorboard_path = os.path.join(config.plotting.save_dir,"runs/exp")
+    tensorboard_path = os.path.join(config.plotting.save_dir,f"runs/exp/{config.checkpoint.MODEL_NAME}")
     writer = SummaryWriter(log_dir=tensorboard_path)
     
-    model = NeuralPeakDetector(     cin=1,
+    model = NeuralPeakDetector( cin=config.model.C_IN,
         base=config.model.BASE_CHANNELS,
         depth=config.model.MODEL_DEPTH,
-        dropout=0.1).to(device)
+        dropout=config.model.DROP_OUT).to(device)
     
     training_history = {
         'train_loss': [],
@@ -72,16 +72,14 @@ def train(config):
 
     pos_weight = torch.tensor([pos_weight_val], dtype=torch.float32, device=device)
     # optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
-    # peak_extractor = DifferentiablePeakExtractor(threshold=0.5, min_distance=10)
-    peak_extractor = LearnablePeakExtractor()
+    peak_extractor = LearnablePeakExtractor(init_thresh=0.4)
     optimizer = torch.optim.AdamW(list(model.parameters()) + list(peak_extractor.parameters()),lr=5e-4, weight_decay=1e-4)
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        # optimizer, mode='max', patience=3, factor=0.8, threshold_mode='rel'
-    # )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', patience=3, factor=0.8, threshold_mode='rel'
+    )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
     stopper = EarlyStoppingBasic(patience=5, min_delta=1e-4)
 
-    # train_loader, val_loader, _ = get_dataloaders(config)
 
     demo_x, demo_y, demo_cnt = next(iter(val_loader))
     demo_x   = demo_x.to(device)
@@ -119,7 +117,7 @@ def train(config):
         val_losses = []
         peak_accuracy_metrics = []
         with torch.no_grad():
-            for x, y,peak_counts, in val_loader:
+            for x, y,peak_counts, in tqdm(val_loader, desc=f'Val Epoch {epoch}/{config.EPOCHS}'):
                 x, y = x.to(device), y.to(device)
 
                 outputs = model(x)
@@ -138,26 +136,28 @@ def train(config):
                 image_num = image_num+1
                 logit = peak_extractor.logit_thresh.detach() 
                 config.model.peak_threshold = torch.sigmoid(logit).item()
-                if image_num % 30 == 0:
-                    plot_model_debug(
-                        model,
-                        sample_batch       = demo_x,
-                        sample_peaks       = demo_y,
-                        sample_peak_counts = demo_cnt,
-                        save_path          = frame_path,
-                        epoch              = epoch,
-                        return_fig         = True,
-                        config = config
-                    )
+                if config.plotting.make_plots:
+                    if image_num % 30 == 0:
+                        plot_model_debug(
+                            model,
+                            peak_extractor = peak_extractor,
+                            sample_batch       = demo_x,
+                            sample_peaks       = demo_y,
+                            sample_peak_counts = demo_cnt,
+                            save_path          = frame_path,
+                            epoch              = epoch,
+                            return_fig         = config.plotting.return_fig,
+                            config = config)
         
-        scheduler.step()
-
+        
         # Calculate epoch metrics
         avg_train_loss = np.mean([l['total_loss'] for l in train_losses])
         avg_val_loss = np.mean([l['total_loss'] for l in val_losses])
         avg_precision = np.mean([m['precision'] for m in peak_accuracy_metrics])
         avg_recall = np.mean([m['recall'] for m in peak_accuracy_metrics])
         avg_f1 = np.mean([m['f1'] for m in peak_accuracy_metrics])
+
+        scheduler.step(avg_val_loss)
         
         # Save metrics for plotting
         training_history['train_loss'].append(avg_train_loss)
@@ -166,7 +166,7 @@ def train(config):
         training_history['recall'].append(avg_recall)
         training_history['f1'].append(avg_f1)
 
-        print(f"Epoch {epoch+1}/{config.EPOCHS}")
+        print(f"Epoch {epoch}/{config.EPOCHS}")
         print(f"Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
         print(f"Peak Detection: Precision={avg_precision:.4f}, Recall={avg_recall:.4f}, F1={avg_f1:.4f}")
 
@@ -177,37 +177,17 @@ def train(config):
         writer.add_scalar('Recall',      avg_f1,        epoch)
 
         # Checkpoint
-        if (epoch+1) % config.checkpoint.SAVE_EVERY == 0:
+        if (epoch) % config.checkpoint.SAVE_EVERY == 0:
             torch.save({
                 'model': model.state_dict(),
                 'optim': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict()
             }, os.path.join(config.checkpoint.CKPT_DIR, f'ckpt_epoch_{epoch}.pth'))
-            # --- 1) generate & save a debug frame for this checkpoint
-            
-            # plot_model_debug(
-            #     model,
-            #     sample_batch       = demo_x,
-            #     sample_peaks       = demo_y,
-            #     sample_peak_counts = demo_cnt,
-            #     save_path          = frame_path,
-            #     epoch              = epoch + 1,
-            #     return_fig         = True
-            # )
 
+            if config.plotting.make_plots:
+                video_path = os.path.join(config.plotting.save_dir,f"training_progress_up_to_epoch_{epoch:03d}.mp4")
+                create_training_video_from_frames(os.path.join(frames_dir, "imageNum_*_epoch_*.png"),video_path,fps=5)
 
-            # --- 2) stitch all frames into a video up to this checkpoint
-            video_path = os.path.join(
-                config.plotting.save_dir,
-                f"training_progress_up_to_epoch_{epoch:03d}.mp4"
-            )
-            create_training_video_from_frames(
-                os.path.join(frames_dir, "imageNum_*_epoch_*.png"),
-                video_path,
-                fps=2
-            )
-
-        # Early stopping
         if stopper.step(avg_val_loss):
             print('Early stopping at epoch', epoch)
             break
@@ -240,11 +220,5 @@ def train(config):
     
     plt.savefig(os.path.join(config.plotting.save_dir, 'training_history.png'))
     plt.show()
-    
-    # Create training video from saved frames
-    # create_training_video_from_frames(
-    #     os.path.join(frames_dir, "epoch_*.png"),
-    #     os.path.join(config.plotting.save_dir, "training_progress.mp4"),
-    #     fps=2
-    # )
+
     return config

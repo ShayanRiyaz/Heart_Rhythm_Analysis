@@ -29,8 +29,9 @@ def decimate_signal(x: np.ndarray,
     if x.ndim != 1:
         raise ValueError("Input must be 1-D")
     # default cutoff just below new Nyquist
-    if cutoff is None:
+    if cutoff is None or cutoff == 0.0:
         cutoff = (fs_out / 2)
+    cutoff = float(cutoff)
     # compute ideal ratio
     ratio = fs_in / fs_out
     # integer decimation?

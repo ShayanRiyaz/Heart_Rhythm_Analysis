@@ -309,6 +309,8 @@ dependencies:
       - werkzeug==3.0.6
       - wfdb==4.3.0
       - yarl==1.20.0
+      - -e .
 variables:
   MIMIC_ALLOWED_ROOT: /Users/shayanriyaz/Documents/Projects/heart_rhythm_analysis/data/raw/
+  # PYTHONPATH: /Users/shayanriyaz/Documents/Projects/heart_rhythm_analysis/src
 # prefix: 

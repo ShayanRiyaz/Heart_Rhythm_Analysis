@@ -3,7 +3,7 @@ import torch
 from lib.models.unet1d import LearnablePeakExtractor
 import numpy as np
 from train.evaluator import calculate_peak_metrics
-import os
+import os, re
 
 
 def plot_peaks(t, signal, gt_peaks, pred_peaks, title=None):
@@ -18,7 +18,7 @@ def plot_peaks(t, signal, gt_peaks, pred_peaks, title=None):
     plt.ylabel('Amplitude')
     plt.show()
 
-def plot_model_debug(model, sample_batch, sample_peaks=None, sample_peak_counts=None, 
+def plot_model_debug(model, sample_batch,peak_extractor = None, sample_peaks=None, sample_peak_counts=None, 
                      save_path=None, epoch=None, return_fig=False,config=None):
     """
     Create a detailed visualization of the model's performance on a batch
@@ -33,28 +33,32 @@ def plot_model_debug(model, sample_batch, sample_peaks=None, sample_peak_counts=
         return_fig: If True, returns the figure object
     """
     model.eval()
-    peak_extractor = LearnablePeakExtractor()
     
     if config is not None:
         peak_prob_th = config.model.peak_threshold
 
     with torch.no_grad():
-        outputs = model(sample_batch)  # {'signal': (B,L), 'peak_map': (B,L)}
-        _, pred_peak_indices, pred_peak_values = peak_extractor(outputs['peak_map'])
-        
-        fig = plt.figure(figsize=(15, 10))
         b = np.random.randint(31)  # visualize first sample
+        outputs = model(sample_batch)  # {'signal': (B,L), 'peak_map': (B,L)}
+        signal = sample_batch[b, 0].cpu().numpy()
+        _, pred_peak_indices, pred_peak_values = peak_extractor(outputs['peak_map'])
+        pm = outputs['peak_map'][b].cpu().numpy()
+        predicted_peaks = pred_peak_indices[b].cpu().numpy().astype(int)
+        peak_values = pred_peak_values[b].cpu().numpy()
+        recon = outputs['signal'][b].cpu().numpy()
+
+        fig = plt.figure(figsize=(15, 10))
 
         # Panel 1: Input signal
         ax1 = fig.add_subplot(3, 1, 1)
-        signal = sample_batch[b, 0].cpu().numpy()
         ax1.plot(signal, label='Input')
         # Overlay true peaks (derive indices straight from the mask)
         if sample_peaks is not None:
             mask = sample_peaks[b].cpu().numpy()
             true_peaks = np.nonzero(mask >= 0.5)[0]   # integer indices where mask == 1
             ax1.scatter(true_peaks,signal[true_peaks],color='blue',marker='x',s=100,label='True Peaks')
-        title = "Input Signal"
+            ax1.scatter(predicted_peaks, signal[predicted_peaks], color='red', marker='o', s=100, label='Predicted Peaks')
+        title = f"Window batch #: {b} | Input Signal"
         if epoch is not None:
             title += f" (Epoch {epoch})"
         ax1.set_title(title)
@@ -62,24 +66,17 @@ def plot_model_debug(model, sample_batch, sample_peaks=None, sample_peak_counts=
 
         # Panel 2: Reconstruction
         ax2 = fig.add_subplot(3, 1, 2)
-        recon = outputs['signal'][b].cpu().numpy()
         ax2.plot(recon, label='Reconstruction')
         ax2.set_title("Reconstructed Signal")
         ax2.legend()
 
-        pm = outputs['peak_map'][b].cpu().numpy()
-        pp = pred_peak_indices[b].cpu().numpy().astype(int)
-        pv = pred_peak_values[b].cpu().numpy()
         # Panel 3: Peak probability map
         ax3 = fig.add_subplot(3, 1, 3)
-        
         ax3.plot(pm, label='Peak Map')
-        # show predicted peaks
-
-        ax3.scatter(pp, pv, color='red', marker='o', s=100, label='Predicted Peaks')
+        ax3.scatter(predicted_peaks, peak_values, color='red', marker='o', s=100, label='Predicted Peaks')
         ax3.scatter(true_peaks,pm[true_peaks],color='blue',marker='x',s=100,label='True Peaks')
         ax3.axhline(peak_prob_th, color='g', linestyle='--',linewidth=2.0, label='Threshold')
-        ax3.set_title(f"Peak Probability Map with Detected Peaks | Th at {peak_prob_th}")
+        ax3.set_title(f"Peak Probability Map with Detected Peaks | Th at {peak_prob_th:.4f} | # GT Peaks: {len(true_peaks)} | # Detected Peaks: {len(predicted_peaks)}")
         ax3.legend()
 
         plt.tight_layout()
@@ -107,8 +104,20 @@ def create_training_video_from_frames(frames_pattern, output_path, fps=2):
     import imageio
     
     # Get all frame files and sort them
-    frame_files = sorted(glob.glob(frames_pattern))
+    files = sorted(glob.glob(frames_pattern))
     
+    # Define a key that extracts the numbers
+    def sort_key(path):
+        match = re.search(r'imageNum_(\d+)_epoch_(\d+)\.png', path)
+        if match:
+            image_num = int(match.group(1))
+            epoch_num = int(match.group(2))
+            return (image_num, epoch_num)
+        else:
+            return (float('inf'), float('inf'))  # Push invalid names to end
+
+    # Sort using the key
+    frame_files = sorted(files, key=sort_key)
     if not frame_files:
         print(f"No frames found matching pattern: {frames_pattern}")
         return
@@ -124,7 +133,7 @@ def create_training_video_from_frames(frames_pattern, output_path, fps=2):
     print(f"Video saved to: {output_path}")
 
 
-def visualize_peak_detection(model, signal_batch, peak_positions=None, peak_counts=None, save_dir=None):
+def visualize_peak_detection(model, signal_batch,peak_extractor=None, peak_positions=None, peak_counts=None, save_dir=None):
     """
     Visualize peak detection performance on multiple samples
     
@@ -139,7 +148,8 @@ def visualize_peak_detection(model, signal_batch, peak_positions=None, peak_coun
         Dictionary with average metrics if ground truth is provided
     """
     model.eval()
-    peak_extractor = DifferentiablePeakExtractor(threshold=0.5, min_distance=10)
+    if peak_extractor is None:
+            peak_extractor = LearnablePeakExtractor()
     
     with torch.no_grad():
         # Forward pass
@@ -188,8 +198,7 @@ def visualize_peak_detection(model, signal_batch, peak_positions=None, peak_coun
             # Show predicted peaks
             pred_peaks = pred_peak_indices[b].cpu().numpy()
             pred_values = pred_peak_values[b].cpu().numpy()
-            plt.scatter(pred_peaks, pred_values, color='red', marker='o', s=100,
-                    label='Predicted Peaks')
+            plt.scatter(pred_peaks, pred_values, color='red', marker='o', s=100,label='Predicted Peaks')
             
             # Show threshold
             plt.axhline(y=0.5, color='g', linestyle='--', label='Threshold')
