@@ -30,55 +30,47 @@ session = requests.Session()
 
 def concat_records(group,record_cols):
     data = group[record_cols].values.flatten()
-    # drop nan/empty
     kept = [str(x) for x in data if pd.notna(x) and str(x).strip()!='']
     return ";".join(kept)
 
-def find_matching_rows(df, columns, match_strings):
-    pattern = '|'.join(map(re.escape, match_strings))
-    regex = re.compile(pattern, flags=re.IGNORECASE)
-    values = df[columns].astype(str).to_numpy()
-    match_matrix = np.vectorize(lambda x: bool(regex.search(x)))(values)
-    row_matches = match_matrix.any(axis=1)
-    return df.index[row_matches].tolist()
-
 class MimicCollator():
     def __init__(self, config,verbose = False):
-        self.config = config
         self.bVerbose = verbose
 
-        self.version_num = get_typecast(config, "version_num",cast_fn=int, default=0,verbose=self.bVerbose)
-
-        self.root_dir  = get_typecast(config, "paths","local","root_folder",cast_fn=Path, default=os.getcwd(),verbose=self.bVerbose)
-        self.mimic_path  = get_typecast(config, "mimic_info","mimic_path",cast_fn=str, default="mimic4wdb/0.1.0/",verbose=self.bVerbose)
-
-        self.out_dir = self.root_dir / "downloaded_files"
-
-        self.mimic_num = get_typecast(config, "mimic_info","mimic_num", cast_fn=str, default="4",verbose=self.bVerbose)
+        # Meta Data
+        self.version_num = get_typecast(config, "version_num",cast_fn=int, default=0)
         self.ethnicity_extract = config.get("ethnicity_extract", False)
-        self.custom_records = get_typecast(config, "custom_records", cast_fn=lambda v: pd.DataFrame(v), default=pd.DataFrame(),verbose=self.bVerbose)
-        self.ethnicity_data = None
+        self.mimic_num = get_typecast(config, "mimic_info","mimic_num", cast_fn=str, default="4",verbose=self.bVerbose)        
+        self.custom_label = config.get("custom_label", -1) 
+        self.custom_records = get_typecast(config, "custom_records", cast_fn=lambda v: pd.DataFrame(v), default=pd.DataFrame())
+        self.ethnicity_data = get_typecast(config, "ethnicity_data", cast_fn= bool, default=False)
 
-        self.num_subjects = self.remaining_subjects = get_typecast(config, "num_subjects", cast_fn=int, default=50,verbose=self.bVerbose)
-        self.MAX_SET_SIZE = get_typecast(config, "max_set_size", cast_fn=int, default=50,verbose=self.bVerbose)
-        self.min_freq = get_typecast(config, "min_freq", cast_fn=int, default=60,verbose=self.bVerbose)
-        self.start_minutes = 5
-        self.end_minutes = get_typecast(config, "min_minutes", cast_fn=int, default=60,verbose=self.bVerbose)
+        # File paths
+        self.root_dir  = get_typecast(config, "paths","local","root_folder",cast_fn=Path, default=os.getcwd())
+        self.out_dir = self.root_dir / "downloaded_files"
+        self.mimic_path  = get_typecast(config, "mimic_info","mimic_path",cast_fn=str, default="mimic4wdb/0.1.0/")
+    
+        # Subject/sample parameters
+        self.num_subjects = self.remaining_subjects = get_typecast(config, "num_subjects", cast_fn=int, default=50)
+        ## Constants
+        self.MAX_SET_SIZE = get_typecast(config, "max_set_size", cast_fn=int, default=50)
+        self.MIN_FREQ = get_typecast(config, "min_freq", cast_fn=int, default=60)
+        self.START_MINUTES = 5
+        self.END_MINUTES = get_typecast(config, "min_minutes", cast_fn=int, default=60)
+        self.START_SAMPLES = int(60*self.START_MINUTES*self.MIN_FREQ)
+        self.END_SAMPLES = int(( self.END_MINUTES*60*self.MIN_FREQ)+ self.START_SAMPLES)
+           
+        # Signal Labels
+        self.ecg_labels = [sig.lower() for sig in get_typecast(config, "required_signals","ecg_labels",cast_fn=list(), default=['ii'])]
+        self.ppg_labels = [sig.lower() for sig in get_typecast(config, "required_signals","ppg_labels",cast_fn=list(), default=['pleth'])]
+        self.abp_labels = [sig.lower() for sig in  get_typecast(config, "required_signals","ppg_labels",cast_fn=list(), default=['abp','art'])]
 
-        self.start_samples = int(60*self.start_minutes*self.min_freq)
-        self.end_samples = int(( self.end_minutes*60*self.min_freq)+ self.start_samples)
-
-        self.custom_label = config.get("custom_label", -1)    
-        self.ecg_labels = [sig.lower() for sig in config.get("ecg_labels", ['ii'])]
-        self.ppg_labels = [sig.lower() for sig in config.get("ppg_labels", ['pleth'])]
-        self.abp_labels = [sig.lower() for sig in config.get("abp_labels", ['abp','art'])]
-
-        self.categories_of_interest = None
+        # Custom MIMIC-4 settings
         if self.mimic_num == "4":
             self.mimic_matched_path = 'https://physionet.org/files/mimic-iv-ecg/1.0/'
         
 
-    def collate_dataset(self, load_metadata=True, load_waveforms=True, download_waveforms=False):
+    def collate_dataset(self, load_waveforms=True):
         ''' 
         -> COLLATE_DATASET
             - Inputs:
@@ -88,167 +80,38 @@ class MimicCollator():
         print(f"\n --- Downloading and collating MIMIC {self.mimic_num} matched waveform subset ---")
         self.setup_paths()
 
-        # if load_metadata and self.ethnicity_extract:
-        #     self.ensure_metadata_downloaded()
-        #     self.load_ethnicity_data()
-        # else:
-        #     print("Skipping metadata download/extraction.")
-        #     self.ethnicity_data = None
-
-        if download_waveforms:
-            self.download_dataset()
-
+        # Prepare Available Records
         if self.mimic_num == "3":
             match_records = self.prepare_mimic3_record_list()
         elif self.mimic_num == "4":
             match_records = self.prepare_mimic4_record_list()
 
+        # Update available record length
         if self.num_subjects > match_records.shape[0]:
             if self.bVerbose: print(f'Not enough subjects available: Setting num_subjects from {self.num_subjects} to {match_records.shape[0]}')
             self.num_subjects = match_records.shape[0]
 
-        existing_n,csv_path  = self._find_best_records_file(self.num_subjects)
+         # Check for existing records mathching length and metadata_requirement
+        csv_path, existing_n  = self._find_best_records_file(self.num_subjects)
         if (existing_n is not None) and (self.num_subjects <= existing_n) and csv_path:
             df = pd.read_csv(csv_path)
             if existing_n > self.num_subjects:
                 df = df.sample(n=self.num_subjects, random_state=42).reset_index(drop=True)
-                print(f"Loaded {existing_n}→sampled to {self.num_subjects} from {csv_path.name}")
-            else:
-                print(f"Loaded {existing_n} from {csv_path.name}")
+                if self.bVerbose: print(f"Loaded {existing_n}→sampled to {self.num_subjects} from {csv_path.name}")
+            else: 
+                if self.bVerbose: print(f"Loaded {existing_n} from {csv_path.name}")
         else:
-            print("No best‐records CSV found; extracting new mapping")
+            if self.bVerbose: print("No best‐records CSV found; extracting new mapping")
             df = self.extract_matching_record_info(match_records)
-            
             out = Path(self.root_dir) / f"mimic{self.mimic_num}_{df.shape[0]}_best_records.csv"
             df.to_csv(out, index=False)
-            print(f"Wrote new {out.name}")
+            if self.bVerbose: print(f"Wrote new {out.name}")
 
         if self.num_subjects > df.shape[0]:
             self.num_subjects = self.remaining_subjects = df.shape[0]
         if load_waveforms:
             self.scan_waveform_directory(match_records,record_info = df)
         return 
-    
-
-
-
-
-    def get_rec_id(self,curr_record):
-        url = f"https://physionet.org/files/{self.mimic_path}{curr_record}RECORDS"
-        resp = session.get(url)
-        resp.raise_for_status()
-        first = resp.text.splitlines()[0].rstrip("/")
-        return first.split("/")[-1]
-    
-
-
-
-
-    def download_dataset(self,base_url):
-        response = requests.get(base_url)
-        response.raise_for_status()
-        html_text = response.text
-        hrefs = []
-        for line in html_text.splitlines():
-            line = line.strip()
-            if 'href="' in line:
-                start = line.find('href="') + len('href="')
-                end = line.find('"', start)
-                href = line[start:end]
-                hrefs.append(href)
-
-        file_hrefs = [href for href in hrefs if not href.endswith('/')]
-        for file_href in file_hrefs:
-            full_url = self.mimic_path + file_href
-            local_filename = os.path.join(self.out_dir, file_href)
-
-            print(f"Downloading: {full_url}")
-            file_response = requests.get(full_url, stream=True)
-            file_response.raise_for_status()
-
-            with open(local_filename, 'wb') as f:
-                for chunk in file_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        print("Download complete.")
-
-
-
-
-
-    def _find_best_records_file(self, desired_n: int) -> Tuple[Optional[Path], int]:
-        """
-        Return (path, count) of the CSV that:
-         - has the smallest count ≥ desired_n, or
-         - otherwise the largest count < desired_n,
-         - or (None, 0) if none exist.
-        """
-        pattern = Path(self.root_dir) / f"mimic{self.mimic_num}_*_best_records.csv"
-        files = list(pattern.parent.glob(pattern.name))
-        if not files:
-            return None, 0
-
-        rx = re.compile(rf"mimic{self.mimic_num}_(\d+)_best_records\.csv$")
-        supersets, subsets = [], []
-        for f in files:
-            m = rx.match(f.name)
-            if not m:
-                continue
-            cnt = int(m.group(1))
-            (supersets if cnt >= desired_n else subsets).append((cnt, f))
-
-        if supersets:
-            return min(supersets, key=lambda x: x[0])
-        if subsets:
-            return max(subsets, key=lambda x: x[0])
-        return None, 0
-    
-
-
-
-
-    def signal_requirements_check(self,filename,pn_dir,header_type):
-        """Read the .hea header, stripping out any '~' segments."""
-        try:
-            hdr = wfdb.rdheader(filename, pn_dir=pn_dir)
-        except Exception as e:
-            return None,0,None
-            
-        if header_type == 'folder':
-            if hasattr(hdr, "seg_name") and "~" in hdr.seg_name:
-                bad = [i for i,n in enumerate(hdr.seg_name) if n == "~"]
-                hdr.seg_name = [n for i,n in enumerate(hdr.seg_name) if i not in bad]
-                hdr.seg_len  = np.delete(hdr.seg_len, bad)
-            return hdr,1,None
-        
-        try:
-            actual_signals = [s.lower() for s in hdr.sig_name]
-        except:
-            actual_signals = None
-            return hdr,0,actual_signals
-        
-        if header_type == 'file':
-            if (hdr.fs < self.min_freq):
-                return hdr,0,actual_signals
-            
-        if self.abp_labels is not None:
-            arterial_signals_present = [label.lower() for label in self.abp_labels if label  in actual_signals]
-            if not arterial_signals_present: 
-                return hdr,0,actual_signals
-
-        if self.ecg_labels is not None:
-            ecg_labels_present = all(label.lower() in actual_signals for label in self.ecg_labels)
-            if not ecg_labels_present: 
-                return hdr,0,actual_signals
-
-        if self.ppg_labels is not None:
-            ppg_labels_present = all(label.lower() in actual_signals for label in self.ppg_labels)
-            if not ppg_labels_present: 
-                return hdr,0,actual_signals
-
-        return hdr,1,actual_signals
-    
-
-
 
 
     def setup_paths(self):
@@ -263,18 +126,13 @@ class MimicCollator():
 
     def prepare_mimic3_record_list(self):
         df_categories = {}
-        # read the RECORDS file and extract subject series
         recs = pd.read_csv(f"https://physionet.org/files/{self.mimic_path}/RECORDS-waveforms",header=None, names=["path"])
-
-        # df_categories['matching_records'] = recs["path"]
-        # subjects_series = recs["path"].str.split("/", expand=True)[1].str.lstrip("p")
         df_categories = pd.DataFrame({
             'matching_records':recs["path"].str.rpartition('/')[0] + '/',
             'subject_id': recs["path"].str.split("/", expand=True)[1].str.lstrip("p"),
             'filename': recs["path"].str.split("/", expand=True)[2]
         })
         df_categories = df_categories.drop_duplicates(subset='subject_id', keep='first')
-
         if not self.custom_records.empty: 
             ids_in_df2 = set(self.custom_records["subject_id"])
             df_categories['in_df2'] = df_categories['subject_id'].isin(ids_in_df2)
@@ -301,7 +159,7 @@ class MimicCollator():
             urlretrieve(url, machine_measurments_path)   # C-optimized download
         machine_measurements_db = pd.read_csv(machine_measurments_path, dtype=dtype_cols)
         recs = pd.read_csv(f"https://physionet.org/files/{self.mimic_path}/RECORDS",header=None, names=["path"])
-        
+    
 
         df_categories = pd.DataFrame({
             'matching_records':recs["path"],
@@ -309,10 +167,8 @@ class MimicCollator():
         })
 
         record_cols = [f"report_{i}" for i in range(18)]  
-
         def concat_records(group):
             data = group[record_cols].values.flatten()
-            # drop nan/empty
             kept = [str(x) for x in data if pd.notna(x) and str(x).strip()!='']
             return ";".join(kept)
         
@@ -323,10 +179,147 @@ class MimicCollator():
         if any_matches:
             mapping = (machine_measurements_db.groupby("subject_id").apply(concat_records).rename("all_records"))
             df_categories = df_categories[df_categories["subject_id"].isin(mapping.index)].copy()
-
             df_categories["all_records"] = df_categories["subject_id"].map(mapping)
         return df_categories
     
+
+
+
+
+    def _find_best_records_file(self, desired_n: int) -> Tuple[Optional[Path], int]:
+        """
+        Find a JSON metadata file with compatible labels and duration, then return:
+        - the corresponding CSV path
+        - and the number of subjects in that set
+
+        Criteria:
+        - smallest 'subjects_returned' ≥ desired_n (and meets other criteria)
+        - if none, fallback to largest < desired_n
+        - return (None, 0) if nothing matches
+        """
+
+        pattern = Path(self.root_dir) / f"mimic{self.mimic_num}_*_meta.json"
+        meta_files = sorted(pattern.parent.glob(pattern.name))
+
+        supersets, subsets = [], []
+
+        for meta_path in meta_files:
+            try:
+                with open(meta_path, 'r') as fp:
+                    meta = json.load(fp)
+
+                subjects_available = meta.get("subjects_returned", 0)
+                total_minutes = meta.get("end_minutes", 0)
+                ppg_labels = meta.get("ppg_labels", [])
+                ecg_labels = meta.get("ecg_labels", [])
+                abp_labels = meta.get("abp_labels", [])
+
+                is_match = (
+                    subjects_available >= desired_n and
+                    total_minutes >= self.END_MINUTES and
+                    ppg_labels == self.ppg_labels and
+                    ecg_labels == self.ecg_labels and
+                    abp_labels == self.abp_labels
+                )
+
+                target_list = supersets if is_match else subsets
+                target_list.append((subjects_available, meta_path))
+
+            except Exception as e:
+                if self.bVerbose:
+                    print(f"Skipping {meta_path} due to error: {e}")
+
+        selected = (
+            min(supersets, key=lambda x: x[0]) if supersets else
+            max(subsets, key=lambda x: x[0]) if subsets else
+            (None, 0)
+        )
+
+        if selected[0] is None:
+            return None, 0
+
+        # Get corresponding CSV path from metadata file name
+        _, meta_file = selected
+        csv_file = meta_file.with_name(meta_file.name.replace("_meta.json", "_best_records.csv"))
+
+        if not csv_file.exists():
+            if self.bVerbose:
+                print(f"Found valid metadata at {meta_file} but missing CSV: {csv_file}")
+            return None, 0
+
+        return csv_file, selected[0]
+    # def _find_best_records_file(self, desired_n: int) -> Tuple[Optional[Path], int]:
+    #     """
+    #     Return (path, count) of the CSV that:
+    #      - has the smallest count ≥ desired_n, or
+    #      - otherwise the largest count < desired_n,
+    #      - or (None, 0) if none exist.
+    #     """
+    #     pattern = Path(self.root_dir) / f"mimic{self.mimic_num}_*_best_records.csv"
+    #     files = list(sorted(pattern.parent.glob(pattern.name)))
+    #     if not files:
+    #         return None, 0
+
+    #     rx = re.compile(rf"mimic{self.mimic_num}_(\d+)_best_records\.csv$")
+    #     supersets, subsets = [], []
+    #     for f in files:
+    #         m = rx.match(f.name)
+    #         if not m:
+    #             continue
+    #         cnt = int(m.group(1))
+    #         (supersets if cnt >= desired_n else subsets).append((cnt, f))
+
+    #     if supersets:
+    #         return min(supersets, key=lambda x: x[0])
+    #     if subsets:
+    #         return max(subsets, key=lambda x: x[0])
+    #     return None, 0
+
+
+
+
+
+
+    def signal_requirements_check(self,filename,pn_dir,header_type):
+        """Read the .hea header, stripping out any '~' segments."""
+        try:
+            hdr = wfdb.rdheader(filename, pn_dir=pn_dir)
+        except Exception as e:
+            return None,0,None
+            
+        if header_type == 'folder':
+            if hasattr(hdr, "seg_name") and "~" in hdr.seg_name:
+                bad = [i for i,n in enumerate(hdr.seg_name) if n == "~"]
+                hdr.seg_name = [n for i,n in enumerate(hdr.seg_name) if i not in bad]
+                hdr.seg_len  = np.delete(hdr.seg_len, bad)
+            return hdr,1,None
+        
+        try:
+            actual_signals = [s.lower() for s in hdr.sig_name]
+        except:
+            actual_signals = None
+            return hdr,0,actual_signals
+        
+        if header_type == 'file':
+            if (hdr.fs < self.MIN_FREQ):
+                return hdr,0,actual_signals
+            
+        if self.abp_labels is not None:
+            arterial_signals_present = [label.lower() for label in self.abp_labels if label  in actual_signals]
+            if not arterial_signals_present: 
+                return hdr,0,actual_signals
+
+        if self.ecg_labels is not None:
+            ecg_labels_present = all(label.lower() in actual_signals for label in self.ecg_labels)
+            if not ecg_labels_present: 
+                return hdr,0,actual_signals
+
+        if self.ppg_labels is not None:
+            ppg_labels_present = all(label.lower() in actual_signals for label in self.ppg_labels)
+            if not ppg_labels_present: 
+                return hdr,0,actual_signals
+
+        return hdr,1,actual_signals
 
 
 
@@ -360,7 +353,7 @@ class MimicCollator():
 
         segs = list(zip(hdr1.seg_name, hdr1.seg_len))
         segs.sort(key=lambda x: x[1], reverse=True)
-        if len(segs) < 2 or segs[0][1] < int(self.end_samples):
+        if len(segs) < 2 or segs[0][1] < int(self.END_SAMPLES):
             return None
 
         # second requirements check
@@ -373,7 +366,7 @@ class MimicCollator():
 
         # finally loop segments until one passes file‐type check
         for seg_name, seg_len in segs:
-            if seg_len < int(self.end_samples):
+            if seg_len < int(self.END_SAMPLES):
                 break
             try:
                 hdr3, ok3, actual_signals = self.signal_requirements_check(filename=seg_name,pn_dir=base_pn_dir,header_type="file")
@@ -384,7 +377,16 @@ class MimicCollator():
 
             # grab the notes
             notes = df_categories.loc[df_categories["matching_records"] == curr_record,"notes"].squeeze() or ""
-            if self.bVerbose: print(f'Added Subject:  idx: {idx}, pn_dir: {base_pn_dir}, rec_id: {rec_id}, file_id: {seg_name}, actual_signals: {actual_signals},\t\tnotes: {notes}')
+            if self.bVerbose:
+                print(
+                f"added subject:  "
+                f"idx: {str(idx).rjust(3)}, "
+                f"pn_dir: {base_pn_dir.ljust(35)}, "
+                f"rec_id: {rec_id.ljust(30)}, "
+                f"file_id: {seg_name.ljust(15)}, "
+                f"signals: {str(actual_signals).ljust(40)}, "
+                f"notes: {notes.ljust(50)}"
+                )
                     
             return {
                 "idx":      idx,
@@ -425,10 +427,6 @@ class MimicCollator():
                 with open(cache_path, "w") as f:
                     json.dump(records_cache, f, indent=2)
 
-        # if isinstance(matching_records, dict):
-        #     record_list = list(matching_records.values())
-        # else:
-        #     record_list = list(matching_records)
         record_list = list(records_cache.keys())
 
         # build args for each record
@@ -452,15 +450,15 @@ class MimicCollator():
 
         meta = {
             "generated_at":  datetime.now(timezone.utc).isoformat() + "Z",
-            "start_seconds": self.start_samples,
-            "end_seconds":   self.end_samples,
+            "timestamp_unix": time.time(),
+            "start_minutes": self.START_MINUTES,
+            "end_minutes":   self.END_MINUTES,
             "ppg_labels":    self.ppg_labels,
             "ecg_labels":    self.ecg_labels,
             "abp_labels":    self.abp_labels,
             "mimic_num":     self.mimic_num,
-            "n_requested":   self.num_subjects,
-            "n_returned":    len(df),
-            "timestamp_unix": time.time(),
+            "subjects_requested":  self.num_subjects,
+            "subjects_returned":   len(df),
             "extract_cache": os.path.basename(cache_path),
         }
         meta_path = os.path.join(
@@ -489,9 +487,7 @@ class MimicCollator():
 
 
 
-    def compute_paths(self,curr_record: str,
-                    curr_idx: int,
-                    record_info: Optional[pd.DataFrame]) -> Tuple[str, str, str, str]:
+    def compute_paths(self, curr_record: str, curr_idx: int, record_info: Optional[pd.DataFrame]) -> Tuple[str, str, str, str]:
         """
         Returns (pn_dir, hea_file, rec_id, file_id).
         Encapsulates all the logic for figuring out filesystem vs URL paths.
@@ -518,24 +514,12 @@ class MimicCollator():
     
 
 
-
-
-    def load_waveform(self,
-        segment_name: str,
-        pn_dir: str,
-        sampfrom: int,
-        sampleto: int,
-        channels: list
-    ):
+    def load_waveform(self, segment_name: str, pn_dir: str, sampfrom: int, sampleto: int, channels: list):
         """Return the rdrecord object truncated to sample_to."""
-        return wfdb.rdrecord(segment_name, pn_dir=pn_dir,sampfrom=sampfrom, sampto=sampleto,channels = channels,return_res=32)
+        return wfdb.rdrecord(segment_name, pn_dir=pn_dir, sampfrom=sampfrom, sampto=sampleto, channels = channels, return_res=32)
     
 
-
-    def extract_notes(self,
-        df_categories: Dict[str,Any],
-        subj_id_ecg: int
-    ) -> Any:
+    def extract_notes(self, df_categories: Dict[str,Any], subj_id_ecg: int) -> Any:
         """Pull out the free-text notes for this subject (MIMIC-4 only)."""
         df = df_categories.get("curr_measurement_df")
         cols = df_categories.get("report_columns", [])
@@ -551,13 +535,7 @@ class MimicCollator():
 
 
 
-    def build_subject_data(self,
-        record,
-        subj_id: str,
-        rec_id: str,
-        file_id: str,
-        notes: Any,
-    ) -> Dict[str,Any]:
+    def build_subject_data(self, record, subj_id: str, rec_id: str,file_id: str, notes: Any) -> Dict[str,Any]:
         """Compose the dict for this one subject."""
         sigs = [s.lower() for s in record.sig_name]
         abp_l = next(l for l in self.abp_labels if l in sigs)
@@ -612,16 +590,11 @@ class MimicCollator():
             abp_l = next(l for l in self.abp_labels if l in sigs)
             abp_i = sigs.index(abp_l)
             channels = [ppg_i,ecg_i,abp_i]
-            # channels = [i for sub in channels for i in (sub if isinstance(sub, (list, tuple)) else [sub])]
             channels = [x for sub in channels for x in (sub if isinstance(sub, list) else [sub])]
-            record = self.load_waveform(
-                seg_name, pn_dir,
-                sampfrom=int(self.start_minutes*60*file_header.fs),
-                sampleto=int(self.end_minutes*60*file_header.fs),
-                channels=channels)
+            record = wfdb.rdrecord(seg_name, pn_dir=pn_dir, sampfrom=int(self.START_MINUTES*60*file_header.fs), sampto=int(self.END_MINUTES*60*file_header.fs), channels = channels, return_res=32)
 
             subj_id     = curr_record.split("/")[-2]
-            subj_notes  = self.extract_notes(df_categories, int(subj_id[1:]))
+            subj_notes  = df_categories.loc[df_categories['subject_id'] == subj_id[1:]]['notes'].values
             data        = self.build_subject_data( record, subj_id, rec_id, file_id, subj_notes)
             return data
 
@@ -630,9 +603,7 @@ class MimicCollator():
                 print(f"Skipping {curr_record!r}: {e}")
             return None
 
-    def scan_waveform_directory(self,df_categories: Dict[str,Any],
-                                record_info: Optional[pd.DataFrame],
-                                max_workers:int = 1) -> list:
+    def scan_waveform_directory(self, df_categories: Dict[str,Any], record_info: Optional[pd.DataFrame], max_workers:int = 1) -> list:
         """
         Parallelized scan over get_records_iterator.
         """
@@ -674,7 +645,7 @@ class MimicCollator():
                     num_subjects_added = 0
         return subject_data
     
-
+    # In Development
     # def download_and_extract_gz(self, url, out_path):
     #     print(f"Downloading from {url}")
     #     gz_path = out_path + ".gz"
@@ -686,38 +657,16 @@ class MimicCollator():
     #         shutil.copyfileobj(f_in, f_out)
     #     os.remove(gz_path)
 
-    # def ensure_metadata_downloaded(self):
-    #     admissions_path = os.path.join(self.out_dir, "ADMISSIONS.csv")
-    #     patients_path = os.path.join(self.out_dir, "PATIENTS.csv")
-
-    #     if not os.path.exists(admissions_path):
-    #         url = f"{self.mimic_path}/ADMISSIONS.csv.gz"
-    #         self.download_and_extract_gz(url, admissions_path)
-
-    #     if not os.path.exists(patients_path):
-    #         url = f"{self.mimic_path}/PATIENTS.csv.gz"
-    #         self.download_and_extract_gz(url, patients_path)
-
-    # def load_ethnicity_data(self):
-    #     print("Loading ethnicity data...")
-    #     admissions_path = os.path.join(self.out_dir, "ADMISSIONS.csv")
-    #     patients_path = os.path.join(self.out_dir, "PATIENTS.csv")
-
-    #     admissions = pd.read_csv(admissions_path)
-    #     patients = pd.read_csv(patients_path)
-
-    #     df = pd.merge(admissions[['SUBJECT_ID', 'ETHNICITY']],
-    #                   patients[['SUBJECT_ID', 'GENDER', 'DOB']],
-    #                   on='SUBJECT_ID')
-    #     self.ethnicity_data = df
-
 if __name__ == "__main__":
     
-
-    VERSION_NUM = 3
+    VERSION_NUM = 1
     MIN_MINUTES = 30
+    ecg_labels = ['II']
+    ppg_labels = ['Pleth']
+    abp_labels = ['abp','art']
+    custom_label = 0
 
-    for MIMIC_NUM in ["4"]:
+    for MIMIC_NUM in ["3","4"]:
         root_folder = f'data/raw/mimic{MIMIC_NUM}_data/'
         if not os.path.exists(root_folder):
             os.makedirs(root_folder, exist_ok = False)
@@ -725,16 +674,16 @@ if __name__ == "__main__":
         custom_records = {}
         bCustomRecords = True
         if MIMIC_NUM == "3":
-            mimic_path = 'mimic3wdb-matched/1.0/'
-            MAX_SUBJECTS = 2100
+            MIMIC_PATH = 'mimic3wdb-matched/1.0/'
+            MAX_SUBJECTS = 11000 
             if bCustomRecords: 
                 try:
                     custom_records = pd.read_csv(f"{root_folder}/mimic3_annotations.csv",header = 0,index_col=0,dtype=str)
                 except Exception as e:
                     print(f'{e}, run "python src/lib/collate_datasets/create_mimic3_notes.py" in terminal to create the file')
         elif MIMIC_NUM == "4":
-            mimic_path = 'mimic4wdb/0.1.0/'
-            MAX_SUBJECTS = 53
+            MIMIC_PATH = 'mimic4wdb/0.1.0/'
+            MAX_SUBJECTS = 100
 
         config = {
             "paths": {
@@ -744,15 +693,21 @@ if __name__ == "__main__":
             },
             "mimic_info": {
                 "mimic_num": MIMIC_NUM,
-                "mimic_path": mimic_path,
+                "mimic_path": MIMIC_PATH,
             },
             "version_num":VERSION_NUM,
             "min_minutes" : MIN_MINUTES,
             "num_subjects": MAX_SUBJECTS,
             "categories_of_interest": [],
             "custom_records": custom_records,
-            "ethnicity_extract": False
+            "ethnicity_extract": False,
+            'required_signals': {
+                    'ecg_labels' : ecg_labels,
+                    'ppg_labels' : ppg_labels,
+                    'abp_labels' : abp_labels,
+                    'custom_label': -1,
+            },
         }
 
         collator = MimicCollator(config,verbose=True)
-        collator.collate_dataset(load_metadata=False, load_waveforms=True, download_waveforms=False)
+        collator.collate_dataset(load_waveforms=True)
