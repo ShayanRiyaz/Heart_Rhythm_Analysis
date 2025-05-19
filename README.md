@@ -23,7 +23,10 @@ Currently I am using ~450 subject MIMIC III subject via physionet. I converted *
 
 ## Model Development
 - Currently i created a dummy Conv1D net for peak detection for PPG Signals. (not sure if its necessary but a good learnign exercise).
-### Result
+### Result Version 1 - Conv1d Net
+![Current Status](assets/image.png)
+
+### Result Version 2 - Denoiser and Peak Extractor
 ![Current Status](assets/image.png)
 
 Goals:
