@@ -27,7 +27,7 @@ Currently I am using ~450 subject MIMIC III subject via physionet. I converted *
 ![Current Status](assets/image.png)
 
 ### Result Version 2 - Denoiser and Peak Extractor
-![Current Status](assets/image.png)
+
 
 Goals:
 - Noisy Frame Detection using Deep Learning + Simple Statistical Measurments 
